@@ -1,5 +1,0 @@
-#!/bin/bash
-printf "\033[48;5;6m"  # or "\033[46m"
-printf "\033[H\033[2J" # your system's clear command does something similar
-printf "\033[38;5;14m" # or "\033[96m"
-echo Hello World

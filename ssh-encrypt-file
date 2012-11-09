@@ -1,3 +1,0 @@
-#!/bin/sh
-
-openssl rsautl -encrypt -inkey $HOME/.ssh/id_rsa.pub -pubin -in "$1" -out "$2"
