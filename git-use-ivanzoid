@@ -1,0 +1,9 @@
+#!/bin/sh
+
+cd ~/.ssh
+ln -f -s id_rsa.ivanzoid id_rsa
+ln -f -s id_rsa.pub.ivanzoid id_rsa.pub
+
+chmod 600 id_rsa
+chmod 700 .
+

@@ -1,0 +1,3558 @@
+#!/bin/bash
+
+# Copyright © 2012 Guillaume Cocatre-Zilgien <guillaume@cocatre.net>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# SoundCheck code adapted from rg2sc (http://www.vdberg.org/~richard/rg2sc.html)
+# by Richard van den Berg <richard@vdberg.org>, licensed under the GPLv3.
+
+# Global variables =============================================================
+
+me='caudec'
+calledAs="${0##*/}"
+VERSION='1.5.2'
+
+EX_OK=0             # successful termination
+EX_KO=1             # unsuccessful termination
+EX_USAGE=64         # command line usage error
+EX_DATAERR=65       # data format error
+EX_NOINPUT=66       # cannot open input
+EX_NOUSER=67        # addressee unknown
+EX_NOHOST=68        # host name unknown
+EX_UNAVAILABLE=69   # service unavailable
+EX_SOFTWARE=70      # internal software error
+EX_OSERR=71         # system error (e.g., can't fork)
+EX_OSFILE=72        # critical OS file missing
+EX_CANTCREAT=73     # can't create (user) output file
+EX_IOERR=74         # input/output error
+EX_TEMPFAIL=75      # temp failure; user is invited to retry
+EX_PROTOCOL=76      # remote error in protocol
+EX_NOPERM=77        # permission denied
+EX_CONFIG=78        # configuration error
+EX_INTERRUPT=143    # user interruption (Ctrl+C)
+
+EL="\\033[2K\\033[0G"
+OK="\\033[1;32m" KO="\\033[1;31m" WG="\\033[1;33m"
+NM="\\033[0m" BD="\\033[1;37m" GR="\\033[1;30m" CY="\\033[0;36m" BCY="\\033[1;36m"
+
+# User settings ================================================================
+
+if [ -r '/etc/caudecrc' ]; then
+	. '/etc/caudecrc'
+	test -n "$maxInstances" && rootMaxInstances="$maxInstances"
+fi
+
+if [ -r "${HOME}/.caudecrc" ]; then
+	. "${HOME}/.caudecrc"
+fi
+
+test -z "$WIN32PATH" && WIN32PATH="${HOME}/.wine"
+test -z "$WIN64PATH" && WIN64PATH="${HOME}/win64"
+
+test -z "$compression_FLAC" && compression_FLAC=5
+test -z "$compression_Flake" && compression_Flake=5
+test -z "$compression_WavPack" && compression_WavPack=
+test -z "$bitrate_WavPackLossy" && bitrate_WavPackLossy=320
+test -z "$compression_MonkeysAudio" && compression_MonkeysAudio=2
+test -z "$compression_TAK" && compression_TAK=2
+test -z "$compression_lossyWAV" && compression_lossyWAV=S
+test -z "$compression_LAME" && compression_LAME=2
+test -z "$bitrate_LAME" && bitrate_LAME=128
+test -z "$LAME_MODE" && LAME_MODE='VBR'
+test -z "$compression_AAC" && compression_AAC=0.5
+test -z "$compression_OggVorbis" && compression_OggVorbis=3
+test -z "$compression_Musepack" && compression_Musepack=5
+test -z "$bitrate_Opus" && bitrate_Opus=96
+
+test -z "$replaygain_percentile" && replaygain_percentile=34
+
+if [ -n "$rootMaxInstances" ]; then
+	maxInstances="$rootMaxInstances"
+elif [ -z "$maxInstances" ]; then
+	maxInstances=1
+fi
+
+# Global values ================================================================
+
+ramdiskName='caudecRamdisk'
+ramdiskDevice=''
+piddir='/tmp/caudec'
+iodir="${piddir}/io"
+preloadSources=true
+
+takWinePrefix="$WIN32PATH" takWineExe='wine'
+if [ -e "${WIN64PATH}/drive_c/windows/Takc.exe" ]; then takWinePrefix="$WIN64PATH" takWineExe='wine64' ; fi
+lossywavWinePrefix="$WIN32PATH" lossywavWineExe='wine'
+if [ -e "${WIN64PATH}/drive_c/windows/lossyWAV.exe" ]; then lossywavWinePrefix="$WIN64PATH" lossywavWineExe='wine64' ; fi
+lameWinePrefix="$WIN32PATH" lameWineExe='wine'
+if [ -e "${WIN64PATH}/drive_c/windows/lame.exe" ]; then lameWinePrefix="$WIN64PATH" lameWineExe='wine64' ; fi
+aacWinePrefix="$WIN32PATH" aacWineExe='wine'
+if [ -e "${WIN64PATH}/drive_c/windows/neroAacEnc.exe" ]; then aacWinePrefix="$WIN64PATH" aacWineExe='wine64' ; fi
+oggencWinePrefix="$WIN32PATH" oggencWineExe='wine'
+if [ -e "${WIN64PATH}/drive_c/windows/oggenc2.exe" ]; then oggencWinePrefix="$WIN64PATH" oggencWineExe='wine64' ; fi
+
+# Functions ====================================================================
+
+printUsage ()
+{
+	if [ "$calledAs" = 'decaude' ]; then
+		echo "caudec ${VERSION}: multi-process command line audio transcoder
+Copyright © 2012 Guillaume Cocatre-Zilgien
+http://caudec.googlecode.com/
+
+Usage: decaude FILES
+Decodes FILES to WAV (same as caudec -d).
+See also: caudec -h"
+	else
+		echo "caudec ${VERSION}: multi-process command line audio transcoder
+Copyright © 2012 Guillaume Cocatre-Zilgien
+http://caudec.googlecode.com/
+
+Usage: $me [ GLOBAL OPTIONS ] [ RESAMPLING ] [ ENCODING/DECODING/RG ] FILES
+Operate on multiple audio files at once, in parallel.
+Multiple codec switches (optionally paired with a -q switch) may be specified.
+Supported input files: .wav, .flac, .wv, .ape, .tak, .m4a (ALAC)
+
+Global options:
+  -s        be silent, only print errors
+  -n N      launch N processes concurrently (1-${maxProcesses});
+            by default, the number of logical CPUs.
+  -o DIR    set already existing output directory
+  -O DIR    set output directory, create it if it doesn't exist already
+
+Resampling options:
+  -b BITS   bit depth (16, 24)
+  -r HZ     sampling rate in Hz (44100, 48000, 88200, 96000, 176400, 192000)
+  -r cd     equivalent to -b 16 -r 44100
+  -r dvd    equivalent to -b 16 -r 48000
+
+Encoding options:
+  -c CODEC  use specified CODEC:
+            flac, flake, wv (WavPack), wvh (WavPack Hybrid), wvl (WavPack lossy)
+            ape, tak, alac, lossyWAV, lossyFLAC, lossyWV, lossyTAK, mp3, lame,
+            winlame, ogg, vorbis, winvorbis, m4a, aac, winaac, mpc, musepack,
+            opus. Note that artwork preservation in MP3s requires eyeD3.
+  -C CODEC  use specified CODEC, but do NOT preserve metadata
+  -q ARG    set compression level (try -q help for a list of valid values)
+  -b ARG    bitrate in bits per sample (2.0-23.9) (for -c wvh/wvl) or
+            in kilobits per second (24-9600) (for -c wvh/wvl, opus or
+            mp3/lame/winlame)
+  -H HASH   compute hash of raw PCM (crc, md5 or sha1)
+
+Decoding options:
+  -d        decode to WAV
+  -t        test file integrity
+
+Replaygain options (mutually exclusive from -c/-d/-t):
+  -g        generate Replaygain metadata
+  -G ARG    MP3 & AAC: compute and apply gain of type ARG (album or track)
+            (no tags, works everywhere)
+  -S ARG    MP3, AAC & ALAC: generate Soundcheck metadata (album or track)
+            Note: Replaygain metadata is also generated with this switch.
+
+Information:
+  -h        display this help and exit
+  -V        output version information and exit
+
+caudec uses a temporary directory for processing files (default: \$TMPDIR, /tmp
+or /dev/shm). If you wish to use another directory, set the CAUDECDIR
+environment variable to its path. It is strongly recommended that the directory
+be mounted on some kind of ramdisk.
+
+For more help, check out the wiki: https://code.google.com/p/caudec/w/list"
+	fi
+}
+
+cleanExit ()
+{
+	if [ -n "$CAUDECDEBUG" -a $1 -ne $EX_OK -a $1 -ne $EX_INTERRUPT -a -e "$errorLogFile" ]; then
+		echo 1>&2
+		cat "$errorLogFile" 1>&2
+	fi
+
+	test -n "$SWAPDIR" && rm -rf "$SWAPDIR"
+	test -n "$TDIR" && rm -rf "$TDIR"
+
+	for f in "$instanceDir"/ioLockFiles/* ; do
+		if [ -e "$f" ]; then
+			mv "${iodir}/${f##*/}.lock" "${iodir}/${f##*/}" >/dev/null 2>&1
+		fi
+	done
+
+	rm -rf "$instanceDir"
+	ls -d "${piddir}"/instance.* >/dev/null 2>&1 || rm -rf "$iodir"
+
+	rmdir "$piddir" >/dev/null 2>&1
+
+	if [ -d "/Volumes/${ramdiskName}" ]; then
+		if ! ls -d "/Volumes/${ramdiskName}"/caudec.* >/dev/null 2>&1; then # ramdisk no longer used
+			ramdiskDevice="$( cat "/Volumes/${ramdiskName}/device" )"
+			until hdiutil detach "$ramdiskDevice" >/dev/null 2>&1 ; do # can fail with message "ressource busy"
+				sleep 1
+			done
+		fi
+	fi
+
+	exit $1
+}
+
+cleanAbort ()
+{
+	echo
+	echo -e "${WG} * ${NM}Aborting..." 1>&2
+	kill $( jobs -p ) >/dev/null 2>&1
+	cleanExit $EX_INTERRUPT
+}
+
+startTimer ()
+{
+	if [ "$OS" = 'Linux' ]; then
+		timer1="$( date '+%s.%N' )"
+	else
+		timer1="$( date '+%s' ).0"
+	fi
+}
+
+stopTimer ()
+{
+	local seconds timer2
+
+	if [ "$OS" = 'Linux' ]; then
+		timer2="$( date '+%s.%N' )"
+	else
+		timer2="$( date '+%s' ).0"
+	fi
+	seconds="$( printf 'scale=6; %.6f - %.6f\n' "$timer2" "$timer1" | bc )"
+	printf '%s: %.2f seconds\n' "$1" $seconds
+}
+
+checkInputFiles ()
+{
+	local f ec=$EX_OK bn basenames=''
+
+	for f in "${sourceFiles[@]}" ; do
+		if [ ! -e "$f" ]; then
+			echo -e "${GR} * ${WG}WG ${CY}${f}${NM}: no such file" 1>&2; ec=$EX_NOINPUT
+		elif [ ! -f "$f" ]; then
+			echo -e "${GR} * ${WG}WG ${CY}${f}${NM}: not a regular file" 1>&2; ec=$EX_DATAERR
+		elif [ ! -r "$f" ]; then
+			echo -e "${GR} * ${WG}WG ${CY}${f}${NM}: cannot open file for reading" 1>&2; ec=$EX_NOINPUT
+		else
+			bn="$( basename "$f" )"
+			bn="${bn%.*}"
+			bn="x${bn%.lossy}Y";
+			if [ "$basenames" != "${basenames//$bn/@}" ]; then
+				echo -e "${GR} * ${WG}WG ${CY}${f##*/}${NM}: there's already an input file with the same basename" 1>&2; ec=$EX_DATAERR
+				continue
+			fi
+			basenames="${basenames}${bn}"
+
+			case "$f" in
+				*.wav)
+					if [ $computeReplaygain = true -o $checkFiles = true ]; then
+						echo -e "${GR} * ${WG}WG ${CY}${f##*/}${NM}: unsupported format" 1>&2; ec=$EX_DATAERR
+					fi
+					;;
+
+				*.m4a)
+					if [ $checkFiles = true ]; then
+						echo -e "${GR} * ${WG}WG ${CY}${f##*/}${NM}: unsupported format" 1>&2; ec=$EX_DATAERR
+					fi
+					;;
+
+				*.flac|*.wv|*.ape|*.tak) continue ;;
+
+				*.mp3|*.ogg)
+					if [ $computeReplaygain = true ]; then
+						continue
+					else
+						echo -e "${GR} * ${WG}WG ${CY}${f##*/}${NM}: unsupported format" 1>&2; ec=$EX_DATAERR
+					fi
+					;;
+				*) echo -e "${GR} * ${WG}WG ${CY}${f##*/}${NM}: unsupported format" 1>&2; ec=$EX_DATAERR ;;
+			esac
+		fi
+	done
+
+	if [ $ec -ne $EX_OK ]; then
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $ec
+	else
+		return $EX_OK
+	fi
+}
+
+checkBinary ()
+{
+	local p rc=$EX_OK
+
+	for b in "$@"; do
+		p="x${b}Y"
+		if [ "$searchedBinaries" = "${searchedBinaries//$p/@}" ]; then # search for binary hasn't been done before
+			searchedBinaries="${searchedBinaries}${p}"
+			case "$b" in
+				*.exe)
+					if [ -f "${WIN64PATH}/drive_c/windows/${b}" -o -f "${WIN32PATH}/drive_c/windows/${b}" ]; then
+						continue
+					else
+						rc=$EX_KO binaryMissing=true
+						echo -e "${GR} * ${WG}WG${NM} Binary \"${b}\" not found. Make sure it is present in either \"${WIN64PATH}/drive_c/windows/\" or \"${WIN32PATH}/drive_c/windows/\"." 1>&2
+					fi
+					;;
+
+				*)
+					if which "$b" >/dev/null 2>&1 ; then
+						continue
+					else
+						rc=$EX_KO binaryMissing=true
+						echo -e "${GR} * ${WG}WG${NM} Binary \"${b}\" not found. Make sure it is in your \$PATH." 1>&2
+					fi
+					;;
+			esac
+		fi
+	done
+
+	return $rc
+}
+
+checkBinaries ()
+{
+	local m4aFileType
+
+	searchedBinaries=''
+	binaryMissing=false
+
+	if ! which 'which' >/dev/null 2>&1 ; then
+		echo -e "${GR} * ${WG}WG${NM} Binary \"which\" not found. Make sure it is in your \$PATH." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_OSFILE
+	fi
+
+	if [ -z "$nTracks" ]; then
+		checkBinary 'uname' 'bc' 'grep' 'fgrep' 'sed' 'tr' 'cut' 'wc' 'df' 'stat' 'mktemp' 'xargs' 'shninfo' 'head' 'tail' 'sort'
+		if [ "$OS" = 'Linux' ]; then
+			checkBinary 'readlink'
+		fi
+	else
+		if [ $computeReplaygain = true ]; then
+			for f in "${sourceFiles[@]}" ; do
+				case "$f" in
+					*.flac) checkBinary 'metaflac' ;;
+					*.wv) checkBinary 'apetag' 'wvgain' ;;
+					*.ape) checkBinary 'mac' 'apetag' 'wavegain' ;;
+					*.tak) checkBinary 'wine' 'Takc.exe' 'apetag' 'wavegain' ;;
+					*.m4a)
+						if checkBinary 'alac'; then
+							m4aFileType="$( alac -t "$f" 2>/dev/null )"
+							if [ "$m4aFileType" = 'file type: alac' ]; then
+								checkBinary 'wavegain' 'neroAacTag'
+							else
+								checkBinary 'neroAacDec' 'aacgain' 'neroAacTag'
+							fi
+						fi
+						;;
+					*.mp3) checkBinary 'lame' 'eyeD3' 'mp3gain' ;;
+					*.ogg) checkBinary 'ogginfo' 'vorbisgain' 'vorbiscomment' ;;
+				esac
+			done
+			if [ $computeSoundcheck = true ]; then
+				checkBinary 'awk'
+			fi
+		elif [ $checkFiles = true ]; then
+			for f in "${sourceFiles[@]}" ; do
+				case "$f" in
+					*.flac) checkBinary 'flac' ;;
+					*.wv) checkBinary 'wvunpack' ;;
+					*.ape) checkBinary 'mac' ;;
+					*.tak) checkBinary 'wine' 'Takc.exe' ;;
+				esac
+			done
+		else
+			for f in "${sourceFiles[@]}" ; do
+				case "$f" in
+					*.flac) checkBinary 'flac' 'metaflac' ;;
+					*.wv) checkBinary 'wvunpack' 'apetag' ;;
+					*.ape) checkBinary 'mac' 'apetag' ;;
+					*.tak) checkBinary 'wine' 'Takc.exe' 'apetag' ;;
+					*.m4a) checkBinary 'alac' 'neroAacTag' ;;
+				esac
+			done
+		fi
+
+		for outputCodec in $outputCodecs; do
+			case "$outputCodec" in
+				FLAC) checkBinary 'flac' ;;
+				Flake) checkBinary 'flake' 'metaflac' ;;
+				WavPack|WavPackHybrid|WavPackLossy) checkBinary 'wavpack' ;;
+				MonkeysAudio) checkBinary 'mac' 'apetag' ;;
+				TAK) checkBinary 'wine' 'Takc.exe' ;;
+				ALAC) checkBinary 'nohup' 'ffmpeg' 'neroAacTag' ;;
+				lossyWAV) checkBinary 'wine' 'lossyWAV.exe' ;;
+				lossyFLAC) checkBinary 'wine' 'lossyWAV.exe' 'flac' ;;
+				lossyWV) checkBinary 'wine' 'lossyWAV.exe' 'wavpack' ;;
+				lossyTAK) checkBinary 'wine' 'lossyWAV.exe' 'Takc.exe' ;;
+				OggVorbis) checkBinary 'oggenc' ;;
+				WinVorbis) checkBinary 'wine' 'oggenc2.exe' ;;
+				LAME) checkBinary 'lame' ;;
+				WinLAME) checkBinary 'wine' 'lame.exe' ;;
+				AAC) checkBinary 'neroAacEnc' 'neroAacTag' ;;
+				WinAAC) checkBinary 'wine' 'neroAacEnc.exe' 'neroAacTag.exe' ;;
+				Musepack) checkBinary 'mpcenc' ;;
+				Opus) checkBinary 'opusenc' ;;
+			esac
+		done
+
+		for h in $hashes; do
+			case $h in
+				CRC) checkBinary 'shncat' 'cksfv' ;;
+				MD5|SHA1) checkBinary 'shnhash' ;;
+			esac
+		done
+
+		if [ -n "$bitDepth" -o -n "$samplingRate" ]; then
+			checkBinary 'sox'
+		fi
+	fi
+
+	if [ $binaryMissing = true ]; then
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_OSFILE
+	else
+		return $EX_OK
+	fi
+}
+
+setNProcesses ()
+{
+	local newN=$1
+
+	for (( i=0 ; i<newN; i++ )); do
+		touch "${instanceDir}/process.$i" >/dev/null 2>&1
+	done
+
+	if [ $newN -lt $nProcesses ]; then
+		for (( i=newN ; i<nProcesses; i++ )); do
+			rm -f "${instanceDir}/process.$i"
+		done
+	elif [ $newN -gt $nProcesses ]; then
+		for (( i=nProcesses ; i<newN; i++ )); do
+			touch "${instanceDir}/process.$i" >/dev/null 2>&1
+		done
+	fi
+
+	nProcesses=$newN
+}
+
+handleInstance ()
+{
+	local nRunningProcesses=0 nAvail=$nProcesses
+
+	if [ ! -e "$piddir" ]; then mkdir -m 0777 -p "$piddir" >/dev/null 2>&1; fi
+
+	if [ ! -d "$piddir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} Couldn't create directory $piddir" 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_CANTCREAT
+	elif [ ! -w "$piddir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $piddir isn't writable." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_NOPERM
+	fi
+
+	if [ ! -d "$iodir" ]; then
+		mkdir -m 0777 -p "$iodir" >/dev/null 2>&1
+	fi
+
+	instanceDir="$( TMPDIR="$piddir" mktemp -d "${piddir}/instance.XXXXXXXX" 2>/dev/null )"
+	if [ -z "$instanceDir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} mktemp failed." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_OSERR
+	elif [ ! -w "$instanceDir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $instanceDir isn't writable." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_NOPERM
+	fi
+	chmod 0755 "$instanceDir"
+	mkdir -m 0755 "${instanceDir}/ioLockFiles"
+	errorLogFile="${instanceDir}/errors.log"
+	touch "$errorLogFile"
+
+	nInstances=$( find "$piddir" -type d -name 'instance.*' 2>/dev/null | wc -l | tr -d ' ' )
+	if [ $nInstances -le $maxInstances ]; then
+		nRunningProcesses=$( find "$piddir" -type f -name 'process.*' 2>/dev/null | wc -l | tr -d ' ' )
+		nAvail=$(( maxProcesses - nRunningProcesses ))
+		if [ $nAvail -eq 0 ]; then
+			echo -e "${GR} * ${WG}WG${NM} There are too many caudec processes already running." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_TEMPFAIL
+		elif [ $nProcesses -gt $nAvail ]; then
+			if [ $verbose = true ]; then
+				echo -e "${GR} * ${WG}WG${NM} Number of processes reduced to $nAvail in order to stay within limits." 1>&2
+			fi
+			setNProcesses $nAvail
+		else
+			setNProcesses $nProcesses
+		fi
+		return 0
+	else
+		if [ $maxInstances -eq 1 ]; then
+			echo -e "${GR} * ${WG}WG${NM} Another instance of caudec is already running." 1>&2
+		else
+			echo -e "${GR} * ${WG}WG${NM} Too many instances of caudec are already running." 1>&2
+		fi
+		echo -e "${GR} *${NM} You might want to increase the 'maxInstances' value in /etc/caudecrc or ~/.caudecrc." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_TEMPFAIL
+	fi
+}
+
+setupMacOSRamdisk ()
+{
+	local bytes='' freePages=0 freeBytes=0 sectors=0 ec=$EX_KO mebibytes=0
+
+	if [ -w "/Volumes/${ramdiskName}" ]; then
+		return $EX_OK
+	elif [ -d "/Volumes/${ramdiskName}" -o -e "${piddir}/creatingRamdisk" ]; then
+		for i in {1..15}; do
+			sleep 0.3
+			if [ -w "/Volumes/${ramdiskName}" ]; then return $EX_OK; fi
+		done
+		return $EX_KO
+	fi
+
+	which 'hdiutil' >/dev/null 2>&1 || return $EX_KO
+	which 'diskutil' >/dev/null 2>&1 || return $EX_KO
+	touch "${piddir}/creatingRamdisk"
+
+	freePages="$( vm_stat | fgrep 'Pages free:' | tr -s ' ' | cut -d ' ' -f 3 )"
+	freePages="${freePages%*.}"
+	freeBytes=$(( freePages * 4096 ))
+	sectors=$(( freeBytes / 512 * 90 / 100 )) # we want 90% of free RAM
+
+	if [ $sectors -ge 20480 ]; then # >= 10 MiB
+		ramdiskDevice="$( hdiutil attach -nomount ram://${sectors} 2>> "$errorLogFile" | tr -d '\t' | sed -e 's@[ ]*$@@' )"
+		test -z "$ramdiskDevice" && return $EX_KO
+		diskutil eraseVolume HFS+ "$ramdiskName" "$ramdiskDevice" >/dev/null 2>> "$errorLogFile" ; ec=$?
+		if [ $ec -eq $EX_OK -a -d "/Volumes/${ramdiskName}" ]; then
+			echo "$ramdiskDevice" > "/Volumes/${ramdiskName}/device"
+			if [ $verbose = true -a -n "$CAUDECDEBUG" ]; then
+				mebibytes=$(( ((sectors * 512) + 524288) / 1048576 )) # add half a mebibyte for proper rounding
+				echo -e "${GR} *${NM} Set up ramdisk with $mebibytes MiB"
+			fi
+			rm -f "${piddir}/creatingRamdisk"
+			return $EX_OK
+		else
+			hdiutil detach "$ramdiskDevice" >/dev/null 2>&1
+			rm -f "${piddir}/creatingRamdisk"
+			return $EX_KO
+		fi
+	else
+		rm -f "${piddir}/creatingRamdisk"
+		return $EX_KO
+	fi
+}
+
+isRamdisk ()
+{
+	local fstype='n/a' device=''
+	if [ ! -d "$1" ]; then echo 'other'; return; fi
+	if [ "$OS" = 'Linux' ]; then
+		fstype="$( df -aT "$1" | tail -n 1 | tr -s ' ' | cut -d ' ' -f 2 )"
+		if [ "$fstype" = 'tmpfs' -o "$fstype" = 'ramfs' ]; then
+			echo 'ramdisk'
+		else
+			device="$( df -a "$1" | tail -n 1 | tr -s ' ' | cut -d ' ' -f 1 )"
+			if [ "$device" != "${device#/dev/ram*}" -o "$device" != "${device#/dev/rd/*}" ]; then
+				echo 'ramdisk'
+			else
+				echo 'other'
+			fi
+		fi
+	else
+		echo 'other'
+	fi
+}
+
+setupSwapdir ()
+{
+	local i c mktempFS='other' devshmFS='other' mktempSpace devshmSpace ec=1 copyLockFile
+
+	if [ -n "$TMPDIR" ]; then mktempDir="$TMPDIR"; else mktempDir='/tmp'; fi
+
+	mktempFS="$( isRamdisk "$mktempDir" )"
+	devshmFS="$( isRamdisk '/dev/shm' )"
+
+	# Find out which of $mktempDir or /dev/shm is more appropriate
+	# First they need to be on a tmpfs, then they need to be writable, then we choose the one with the most available space
+	if [ -n "$CAUDECDIR" ]; then
+		if [ "${CAUDECDIR%/}" != "$CAUDECDIR" ]; then
+			CAUDECDIR="${CAUDECDIR%/}"
+		fi
+
+		if [ "$OS" = 'Linux' ]; then
+			CAUDECDIR="$( readlink -f "$CAUDECDIR" )"
+		elif [ "${CAUDECDIR:0:1}" != '/' ]; then
+			CAUDECDIR="${PWD}/${CAUDECDIR}"
+		fi
+
+		if [ ! -e "$CAUDECDIR" ]; then
+			echo -e "${GR} * ${WG}WG${NM} $CAUDECDIR doesn't exist." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_OSFILE
+		elif [ ! -d "$CAUDECDIR" ]; then
+			echo -e "${GR} * ${WG}WG${NM} $CAUDECDIR isn't a directory." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_CANTCREAT
+		elif [ ! -w "$CAUDECDIR" ]; then
+			echo -e "${GR} * ${WG}WG${NM} $CAUDECDIR isn't writable." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_NOPERM
+		fi
+		mktempDir="$CAUDECDIR"
+		mktempFS="$( isRamdisk "$mktempDir" )"
+		if [ "$mktempFS" != 'ramdisk' ]; then
+			preloadSources=false
+			if [ $verbose = true ]; then
+				echo -e "${GR} * ${WG}WG${NM} $CAUDECDIR isn't on a ramdisk." 1>&2
+				echo -e "${GR} *${NM} Performance will likely suffer." 1>&2
+			fi
+		fi
+	elif [ "$mktempFS" = 'ramdisk' -a "$devshmFS" = 'ramdisk' ]; then # both filesystems are ramdisks
+		if [ -w "$mktempDir" -a -w '/dev/shm' ]; then # both dirs are writable
+			# check free space on each filesystem
+			mktempSpace="$( stat -f -c '%a * %S' "$mktempDir" | bc )"
+			devshmSpace="$( stat -f -c '%a * %S' '/dev/shm' | bc )"
+			if [ $devshmSpace -gt $mktempSpace ]; then # /dev/shm has more available space than $mktempDir
+				mktempDir='/dev/shm'
+			fi
+		elif [ -w "$mktempDir" ]; then
+			true # we choose $mktempDir, nothing to do
+		elif [ -w '/dev/shm' ]; then
+			mktempDir='/dev/shm'
+		else # neither dir is writable
+			echo -e "${GR} * ${WG}WG${NM} Neither ${mktempDir} or /dev/shm is writable." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_NOPERM
+		fi
+	elif [ "$mktempFS" = 'ramdisk' ]; then
+		if [ ! -w "$mktempDir" ]; then
+			echo -e "${GR} * ${WG}WG${NM} ${mktempDir} isn't writable." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_NOPERM
+		fi
+	elif [ "$devshmFS" = 'ramdisk' ]; then
+		if [ -w '/dev/shm' ]; then
+			mktempDir='/dev/shm'
+		else
+			echo -e "${GR} * ${WG}WG${NM} /dev/shm isn't writable." 1>&2
+			echo -e "${GR} *${NM} Aborting." 1>&2
+			cleanExit $EX_NOPERM
+		fi
+	else # neither dir is on a tmpfs
+		if [ "$OS" = 'Darwin' ]; then # Mac OS X
+			setupMacOSRamdisk ; ec=$?
+			if [ $ec -eq $EX_OK ]; then
+				mktempDir="/Volumes/${ramdiskName}"
+			else
+				preloadSources=false
+				echo -e "${GR} * ${WG}WG${NM} Attempt to create a ramdisk failed." 1>&2
+				echo -e "${GR} *${NM} Performance will likely suffer." 1>&2
+			fi
+		else
+			preloadSources=false
+			if [ $verbose = true ]; then
+				echo -e "${GR} * ${WG}WG${NM} Neither ${mktempDir} or /dev/shm is on a ramdisk." 1>&2
+				echo -e "${GR} *${NM} Performance will likely suffer." 1>&2
+			fi
+		fi
+	fi
+
+	if [ ! -e "$mktempDir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $mktempDir doesn't exist." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_OSFILE
+	elif [ ! -d "$mktempDir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $mktempDir isn't a directory." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_CANTCREAT
+	elif [ ! -w "$mktempDir" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $mktempDir isn't writable." 1>&2
+
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_NOPERM
+	fi
+
+	TDIR="$( TMPDIR="$mktempDir" mktemp -d "${mktempDir}/${me}.XXXXXXXX" 2>/dev/null )"
+
+	if [ -z "$TDIR" ]; then
+		echo -e "${GR} * ${WG}WG${NM} mktemp failed." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_OSERR
+	elif [ ! -w "$TDIR" ]; then
+		echo -e "${GR} * ${WG}WG${NM} $TDIR isn't writable." 1>&2
+		echo -e "${GR} *${NM} Aborting." 1>&2
+		cleanExit $EX_NOPERM
+	fi
+
+	chmod 0755 "$TDIR"
+
+	if [ "$OS" = 'Linux' ]; then
+		TDEV="$( stat -c '%d' "$TDIR" )"
+	else
+		TDEV="$( stat -f '%d' "$TDIR" )"
+	fi
+	echo "$TDEV" > "${instanceDir}/tdev"
+	echo "$TDIR" > "${instanceDir}/tdir"
+
+	SWAPDIR="$TDIR"
+
+	for ((i=0; i<${#sourceFiles[@]}; i++)); do
+		if [ "$OS" = 'Linux' ]; then
+			copyLockFile="${iodir}/$( stat -c '%d' "${sourceFiles[$i]}" 2>> "$errorLogFile" )"
+		else
+			copyLockFile="${iodir}/$( stat -f '%d' "${sourceFiles[$i]}" 2>> "$errorLogFile" )"
+		fi
+		if [ ! -e "${copyLockFile}.lock" ]; then
+			touch "$copyLockFile"
+		fi
+
+		touch "${TDIR}/${i}"
+		if [ $nLossyWAV -ge 1 ]; then
+			touch "${TDIR}/lossyWAV_${i}"
+			touch "${TDIR}/lossyWAV_${i}_WAV_NEEDED"
+		fi
+		for outputCodec in $outputCodecs; do
+			touch "${TDIR}/${outputCodec}_${i}"
+			touch "${TDIR}/${outputCodec}_${i}_WAV_NEEDED"
+			if [ "$outputCodec" = 'lossyFLAC' -o "$outputCodec" = 'lossyWV' -o "$outputCodec" = 'lossyTAK' ]; then
+				touch "${TDIR}/${outputCodec}_${i}_LOSSYWAV_NEEDED"
+				touch "${TDIR}/lossyWAV_${i}_WAV_NEEDED"
+			fi
+		done
+	done
+
+	echo -n "0" > "${TDIR}/durations"
+	echo -n "0" > "${TDIR}/readTimes"
+}
+
+getDuration ()
+{
+	local duration minutes milliseconds bn
+	seconds=0
+	bn="$( basename "$1" )"
+	shninfoFile="${TDIR}/${bn}.shninfo"
+	if [ ! -f "$shninfoFile" ]; then
+		shninfo "$1" > "$shninfoFile" 2>> "$errorLogFile" || return $EX_KO
+	fi
+	duration="$( fgrep 'Length:' "$shninfoFile" | cut -d ':' -f 2- | tr -d ' ' )"
+	if [ -n "$duration" ]; then
+		duration="${duration##* }"
+		minutes="${duration%:*}" ; minutes="${minutes#0}"
+		seconds="${duration#*:}"
+		milliseconds="${seconds#*.}" ; milliseconds="${milliseconds#0}"
+		seconds="${seconds%.*}" ; seconds="${seconds#0}"
+		seconds=$(( (minutes * 60) + seconds ))
+		if [ "${milliseconds:2:1}" = '' ]; then # CD frames, i.e. <= 75
+			if [ $milliseconds -ge 38 ]; then
+				((seconds++))
+			fi
+		else # milliseconds
+			if [ $milliseconds -ge 500 ]; then
+				((seconds++))
+			fi
+		fi
+	fi
+}
+
+getDecodedSize ()
+{
+	local bd sr nChannels
+	getDuration "$1"
+	if [ $seconds -gt 0 ]; then # shninfo doesn't seem to support multi-channel WAV files
+		bd="$( fgrep 'Bits/sample:' "$shninfoFile" | cut -d ':' -f 2 )"
+		bd="${bd##* }"
+		sr="$( fgrep 'Samples/sec:' "$shninfoFile" | cut -d ':' -f 2 )"
+		sr="${sr##* }"
+		nChannels="$( fgrep 'Channels:' "$shninfoFile" | cut -d ':' -f 2 )"
+		nChannels="${nChannels##* }"
+		decodedSize=$(( seconds * nChannels * sr * (bd / 8) ))
+	fi
+}
+
+getTakDecodedSize ()
+{
+	local f d c
+
+	f="$( basename "$1" )"
+	d="$( dirname "$1" )"
+	cd "$d"
+	c="$( WINEPREFIX="$takWinePrefix" $takWineExe takc -fim2 ".\\$f" 2>/dev/null | fgrep 'Compression:' | tr -s ' ' | cut -d ' ' -f 3 )"
+	cd "$OLDPWD"
+	if [ -n "$c" ]; then
+		decodedSize="$( echo "scale=0; $fsize * 100 / $c" | bc )"
+	fi
+}
+
+getFlacDecodedSize ()
+{
+	local b c samples
+	b="$( metaflac --show-bps "$1" )"
+	c="$( metaflac --show-channels "$1" )"
+	samples="$( metaflac --show-total-samples "$1" )"
+	decodedSize=$(( samples * c * (b / 8) ))
+}
+
+getWavpackDecodedSize ()
+{
+	local ratio
+	ratio="$( wvunpack -s "$1" 2>/dev/null | fgrep 'compression:' | cut -d ':' -f 2 | tr -d ' %' )"
+	ratio="$( echo "scale=2; 100 - $ratio" | bc )"
+	decodedSize="$( echo "scale=1; ($fsize * 100 / $ratio) + 0.5" | bc )"
+	decodedSize="${decodedSize%.*}"
+}
+
+getFlacResampledSize ()
+{
+	local sr b c samples
+	samples="$( metaflac --show-total-samples "$1" )"
+	c="$( metaflac --show-channels "$1" )"
+	if [ -n "$bitDepth" ]; then
+		b=$bitDepth
+	else
+		b="$( metaflac --show-bps "$1" )"
+	fi
+	if [ -n "$samplingRate" ]; then
+		osr="$( metaflac --show-sample-rate "$1" )"
+		sr=$samplingRate
+		resampledSize=$(( (samples * sr / osr) * c * (b / 8) ))
+	else
+		resampledSize=$(( samples * c * (b / 8) ))
+	fi
+}
+
+getTakResampledSize ()
+{
+	local f d str sr b c seconds
+	f="$( basename "$1" )"
+	d="$( dirname "$1" )"
+	cd "$d"
+	str="$( WINEPREFIX="$takWinePrefix" $takWineExe takc -fim2 ".\\$f" 2>/dev/null | fgrep 'Audio format:' | tr -d ' \r' | cut -d ':' -f 2 )"
+	seconds="$( WINEPREFIX="$takWinePrefix" $takWineExe takc -fim2 ".\\$f" 2>/dev/null | fgrep 'File duration:' | tr -d ' \r' | cut -d ':' -f 2 )"
+	seconds="${seconds%sec}"
+	cd "$OLDPWD"
+
+	if [ -n "$samplingRate" ]; then
+		sr=$samplingRate
+	else
+		sr="$( echo "$str" | cut -d ',' -f 2 )"; sr="${sr%Hz}"
+	fi
+
+	if [ -n "$bitDepth" ]; then
+		b=$bitDepth
+	else
+		b="$( echo "$str" | cut -d ',' -f 3 )"; b="${b%Bits}"
+	fi
+
+	c="$( echo "$str" | cut -d ',' -f 4 )"; c="${c%Channels}"
+	resampledSize="$( echo "scale=0; $seconds * $sr * $c * ($b / 8)" | bc )"
+	resampledSize="${resampledSize%.*}"
+}
+
+getResampledSize ()
+{
+	local bd sr nChannels
+	getDuration "$1"
+	if [ $seconds -gt 0 ]; then # shninfo doesn't seem to support multi-channel WAV files
+		bd="$bitDepth"
+		if [ -z "$bitDepth" ]; then
+			bd="$( shninfo "$1" 2>/dev/null | fgrep 'Bits/sample:' | cut -d ':' -f 2 )"
+			bd="${bd##* }"
+		fi
+		sr="$samplingRate"
+		if [ -z "$samplingRate" ]; then
+			sr="$( shninfo "$1" 2>/dev/null | fgrep 'Samples/sec:' | cut -d ':' -f 2 )"
+			sr="${sr##* }"
+		fi
+		nChannels="$( shninfo "$1" 2>/dev/null | fgrep 'Channels:' | cut -d ':' -f 2 )"
+		nChannels="${nChannels##* }"
+		resampledSize=$(( seconds * nChannels * sr * (bd / 8) ))
+	else
+		if [ $unable = false ]; then
+			echo -e "${GR} * ${WG}WG${NM} unable to predict required space in $mktempDir" 1>&2
+			unable=true
+		fi
+	fi
+}
+
+checkFreeSpace ()
+{
+	local f fsize fsizec nBytesFiles=0 otdev otdir kbytes requiredSpace=0 freeSpace=0 copySpace decodedSpace requiredDecodedSpace=0 requiredResampledSpace=0 decodedSize encodedSize requiredMiB freeMiB np=$nProcesses m4aFileType
+
+	if [ "$OS" = 'Linux' ]; then
+		freeSpace="$( stat -f -c '%a * %S' "$TDIR" | bc )"
+	else
+		freeSpace="$( df "$TDIR" 2>/dev/null | fgrep -v 'Available' | tr -s ' ' | cut -d ' ' -f 4 )"
+		freeSpace=$(( freeSpace * 512 ))
+	fi
+
+	if [ $nInstances -gt 1 ]; then
+		for d in "${piddir}"/instance.*; do
+			if [ "$d" = "$instanceDir" ]; then continue; fi
+			otdev="$( cat "${d}/tdev" )"
+			if [ "$otdev" = "$TDEV" ]; then
+				for i in {1..15}; do
+					if [ -f "${d}/bytes" ]; then
+						# subtract disk space requirements declared by other instances using the same device
+						fsize="$( cat "${d}/bytes" )"
+						freeSpace=$(( freeSpace - fsize ))
+						# the "bytes" files include the size of already created files, we need to re-adjust $freeSpace
+						otdir="$( cat "${d}/tdir" )"
+						kbytes="$( du -k "$otdir" 2>/dev/null | cut -f 1 )" # we may not have permission
+						if [ -n "$kbytes" ]; then
+							freeSpace=$(( freeSpace + ( kbytes * 1024 ) ))
+						fi
+						break
+					fi
+					sleep 0.3
+				done
+			fi
+		done
+	fi
+
+	freeMiB=$(( (freeSpace + 524288) / 1048576 )) # add half a mebibyte for proper rounding
+
+	for f in "${sourceFiles[@]}" ; do
+		if [ "$OS" = 'Linux' ]; then
+			fsize="$( stat -c '%b * %B' "$f" | bc )"
+			if [ -e "${f}c" ]; then
+				fsizec="$( stat -c '%b * %B' "${f}c" | bc )"
+				fsize=$(( fsize + fsizec ))
+			fi
+		else
+			fsize="$( stat -f '%b * 512' "$f" | bc )"
+			if [ -e "${f}c" ]; then
+				fsizec="$( stat -f '%b * 512' "${f}c" | bc )"
+				fsize=$(( fsize + fsizec ))
+			fi
+		fi
+		echo "$fsize $f" >> "${TDIR}/fileSizes"
+	done
+
+	while (( nProcesses > 0 )); do
+		# At worst, we'll be processing $nProcesses files at once and they're going to be the largest of the bunch
+		sort -n -r "${TDIR}/fileSizes" | head -n $nProcesses > "${TDIR}/sortedSizes"
+
+		copySpace=0
+		if [ $preloadSources = true ]; then
+			while read s f; do
+				copySpace=$(( copySpace + s ))
+			done < "${TDIR}/sortedSizes"
+		fi
+
+		if [ "$1" = 'testing' ]; then
+			requiredSpace=$copySpace
+			if [ $requiredSpace -ge $freeSpace ]; then
+				setNProcesses $(( nProcesses - 1 ))
+				continue
+			else
+				break
+			fi
+		elif [ "$1" = 'replaygain' ]; then
+			requiredDecodedSpace=$copySpace decodedSpace=0
+			while read fsize f; do
+				case "$f" in
+					*.tak)
+						decodedSize=$(( fsize * 100 / 50 ))
+						getTakDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.ape)
+						decodedSize=$(( fsize * 100 / 50 ))
+						getDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.m4a)
+						m4aFileType="$( alac -t "$f" 2>> "$errorLogFile" )"
+						if [ "$m4aFileType" = 'file type: alac' ]; then
+							decodedSize=$(( fsize * 100 / 50 ))
+						else
+							decodedSize=$(( fsize * 100 / 12 ))
+						fi
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.mp3)
+						decodedSize=$(( fsize * 100 / 12 ))
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+				esac
+			done < "${TDIR}/sortedSizes"
+			requiredDecodedSpace=$(( requiredDecodedSpace * 105 / 100 )) # add 5% of margin
+			if [ $requiredDecodedSpace -ge $freeSpace ]; then
+				setNProcesses $(( nProcesses - 1 ))
+				continue
+			else
+				break
+			fi
+		elif [ "$1" = 'transcoding' ]; then
+			requiredDecodedSpace=$copySpace decodedSpace=0
+			while read fsize f; do
+				case "$f" in
+					*.flac)
+						getFlacDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.wv)
+						getWavpackDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.tak)
+						decodedSize=$(( fsize * 100 / 50 ))
+						getTakDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.ape)
+						decodedSize=$(( fsize * 100 / 50 ))
+						getDecodedSize "$f"
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.m4a)
+						decodedSize=$(( fsize * 100 / 50 ))
+						requiredDecodedSpace=$(( requiredDecodedSpace + decodedSize ))
+						;;
+					*.wav) decodedSize=$fsize ;; # already included in copySpace
+				esac
+				decodedSpace=$(( decodedSpace + decodedSize ))
+			done < "${TDIR}/sortedSizes"
+			requiredDecodedSpace=$(( requiredDecodedSpace * 105 / 100 )) # add 5% of margin
+			if [ $requiredDecodedSpace -ge $freeSpace ]; then
+				setNProcesses $(( nProcesses - 1 ))
+				continue
+			fi
+
+			if [ -n "$bitDepth" -o -n "$samplingRate" ]; then # resampling
+				requiredResampledSpace=$decodedSpace resampledSpace=0 unable=false
+				while read fsize f; do
+					resampledSize=$fsize
+					case "$f" in
+						*.flac) getFlacResampledSize "$f" ;;
+						*.tak) getTakResampledSize "$f" ;;
+						*.wav|*.ape|*.wv) getResampledSize "$f" ;;
+						*)
+							if [ $unable = false ]; then
+								echo -e "${GR} * ${WG}WG${NM} unable to predict required space in $mktempDir" 1>&2
+								unable=true
+							fi
+							;;
+					esac
+					resampledSpace=$(( resampledSpace + resampledSize ))
+				done < "${TDIR}/sortedSizes"
+				requiredResampledSpace=$(( decodedSpace + resampledSpace ))
+				requiredResampledSpace=$(( requiredResampledSpace * 105 / 100 )) # add 5% of margin
+				if [ $requiredResampledSpace -ge $freeSpace ]; then
+					setNProcesses $(( nProcesses - 1 ))
+					continue
+				fi
+				decodedSpace=$resampledSpace
+			fi
+
+			requiredSpace=$decodedSpace
+			while read fsize f; do
+				if [ -n "$bitDepth" -o -n "$samplingRate" ]; then # resampling
+					resampledSize=$(( fsize * 100 / 50 ))
+					case "$f" in
+						*.flac) getFlacResampledSize "$f" ;;
+						*.tak) getTakResampledSize "$f" ;;
+						*.wav|*.wv|*.ape) getResampledSize "$f" ;;
+					esac
+					decodedSize=$resampledSize
+				else
+					decodedSize=''
+					case "$f" in
+						*.flac) getFlacDecodedSize "$f" ;;
+						*.wv) getWavpackDecodedSize "$f"  ;;
+						*.tak) getTakDecodedSize "$f" ;;
+						*.ape) getDecodedSize "$f" ;;
+						*.m4a) decodedSize=$(( fsize * 100 / 50 )) ;;
+						*.wav) decodedSize=$fsize ;;
+					esac
+					if [ -z "$decodedSize" ]; then
+						decodedSize=$(( fsize * 100 / 50 ))
+					fi
+				fi
+				sourceFilename="${f##*/}"
+				sourceBasename="${sourceFilename%.*}"
+				if [ "$sourceBasename" != "${sourceBasename%.lossy}" ]; then
+					sourceIsLossyWAV=true
+				else
+					sourceIsLossyWAV=false
+				fi
+				if [ $nLossyWAV -ge 1 -a $sourceIsLossyWAV = false ]; then
+					requiredSpace=$(( requiredSpace + decodedSize )) # encoded lossyWAV is equivalent to decodedSize
+				fi
+
+				for outputCodec in $outputCodecs ; do
+					case $outputCodec in
+						WAV) encodedSize=0 ;;
+						FLAC|Flake|WavPack|WavPackHybrid|MonkeysAudio|TAK|ALAC) encodedSize=$(( decodedSize * 80 / 100 )) ;;
+						lossyFLAC|lossyWV|lossyTAK|WavPackLossy) encodedSize=$(( decodedSize * 60 / 100 )) ;;
+						LAME|WinLAME) encodedSize=$(( decodedSize * 25 / 100 )) ;;
+						OggVorbis|WinVorbis) encodedSize=$(( decodedSize * 45 / 100 )) ;;
+						AAC|WinAAC) encodedSize=$(( decodedSize * 35 / 100 )) ;;
+						Musepack) encodedSize=$(( decodedSize * 25 / 100 )) ;;
+						Opus) encodedSize=$(( decodedSize * 15 / 100 )) ;;
+					esac
+					requiredSpace=$(( requiredSpace + encodedSize ))
+				done
+			done < "${TDIR}/sortedSizes"
+
+			requiredSpace=$(( requiredSpace * 105 / 100 )) # add 5% of margin
+			if [ $requiredSpace -ge $freeSpace ]; then
+				setNProcesses $(( nProcesses - 1 ))
+				continue
+			else
+				break
+			fi
+		fi
+	done
+
+	if [ $requiredDecodedSpace -ge $requiredSpace -a $requiredDecodedSpace -ge $requiredResampledSpace ]; then
+		requiredSpace=$requiredDecodedSpace
+	elif [ $requiredResampledSpace -ge $requiredSpace -a $requiredResampledSpace -ge $requiredDecodedSpace ]; then
+		requiredSpace=$requiredResampledSpace
+	fi
+
+	requiredMiB=$(( (requiredSpace + 524288) / 1048576 )) # add half a mebibyte for rounding
+	if [ $requiredSpace -lt $freeSpace ]; then
+		if [ $verbose = true ]; then
+			if [ $np -gt $nProcesses ]; then
+				echo -e "${GR} * ${WG}WG${NM} Number of processes reduced to $nProcesses due to insufficient space in $mktempDir" 1>&2
+				echo -e "${GR} *${NM} Projected required space: $requiredMiB MiB, $freeMiB MiB available." 1>&2
+			elif [ -n "$CAUDECDEBUG" ]; then
+				echo -e "${GR} *${NM} Projected required space: $requiredMiB MiB, $freeMiB MiB available."
+			fi
+		fi
+		echo $requiredSpace > "${instanceDir}/bytes"
+		return $EX_OK
+	else
+		echo -e "${GR} * ${WG}WG${NM} Insufficient space in ${mktempDir}! $requiredMiB MiB required, $freeMiB MiB available." 1>&2
+		if [ -n "$CAUDECDIR" ]; then
+			if [ "$CAUDECDIR" = "$TMPDIR" -a "$CAUDECDIR" != '/tmp' ]; then
+				CAUDECDIR='/tmp'
+				rm -rf "$TDIR"
+				echo -e "${GR} *${NM} Switching to $CAUDECDIR." 1>&2
+				setNProcesses $oProcesses
+				setupSwapdir
+				checkFreeSpace "$1"
+			else
+				echo -e "${GR} *${NM} Aborting." 1>&2
+				cleanExit $EX_CANTCREAT
+			fi
+		else
+			if [ -n "$TMPDIR" -a -w "$TMPDIR" -a "$mktempDir" != "$TMPDIR" ]; then
+				CAUDECDIR="$TMPDIR"
+			elif [ "$mktempDir" != '/tmp' ]; then
+				CAUDECDIR='/tmp'
+			else
+				echo -e "${GR} *${NM} Aborting." 1>&2
+				cleanExit $EX_CANTCREAT
+			fi
+			rm -rf "$TDIR"
+			echo -e "${GR} *${NM} Switching to $CAUDECDIR." 1>&2
+			setNProcesses $oProcesses
+			setupSwapdir
+			checkFreeSpace "$1"
+		fi
+	fi
+}
+
+tagline ()
+{
+	local IFS=' ' tags switch value pattern
+	test -e "$destTagFile" || return
+
+	if [ $computeReplaygain = false ]; then
+		pattern="x${outputCodec}Y"
+		if [ "$preserveMetadata" = "${preserveMetadata//$pattern/@}" ]; then
+			return
+		fi
+	fi
+
+	case "$outputCodec" in
+		WavPackLossy|LAME|WinLAME|AAC|WinAAC|OggVorbis|WinVorbis|Musepack|Opus)
+			grep -viE "replaygain|MD5=|CRC=|SHA1=" "$destTagFile" > "${destTagFile}.2"
+			mv "${destTagFile}.2" "$destTagFile"
+			;;
+	esac
+
+	if [ -n "$1" ]; then
+		while read line; do
+			tags="${tags}\x00${1}\x00${line}"
+		done < "$destTagFile"
+	elif [ "${destTagFile/.m4a.txt/}" != "$destTagFile" ]; then
+		while read value; do
+			tags="${tags}\x00${value}"
+		done < "$destTagFile"
+	else
+		while read switch value; do
+			tags="${tags}\x00${switch}\x00${value}"
+		done < "$destTagFile"
+	fi
+	printf -- "%s" "${tags//%/%%}" | sed -e 's#§#\n#g'
+}
+
+# http://wiki.xiph.org/Field_names
+# http://age.hobba.nl/audio/mirroredpages/ogg-tagging.html
+# http://reallylongword.org/vorbiscomment/
+# http://wiki.hydrogenaudio.org/index.php?title=APE_key
+# http://www.id3.org/id3v2.3.0
+
+vorbisCommentsToAPEv2 ()
+{
+	local line field value totalDiscs='' totalTracks=''
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			DISCTOTAL|TOTALDISCS)   totalDiscs="$value" ;;
+			TRACKTOTAL|TOTALTRACKS) totalTracks="$value" ;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			ALBUM)                 echo "Album=$value" ;;
+			ALBUMARTIST|"ALBUM ARTIST") echo "Album Artist=$value" ;;
+			ARTIST)                echo "Artist=$value" ;;
+			COMPOSER)              echo "Composer=$value" ;;
+			CONDUCTOR)             echo "Conductor=$value" ;;
+			COPYRIGHT)             echo "Copyright=$value" ;;
+			CRC)                   echo "CRC=$value" ;;
+			DATE)                  printf 'Year=%.4s\n' "$value" ;;
+			DESCRIPTION)           echo "Comment=$value" ;;
+			DISCNUMBER)
+				if [ -n "$totalDiscs" ]; then
+					printf 'Disc=%g/%g\n' "$value" "$totalDiscs"
+				else
+					printf 'Disc=%g\n' "$value"
+				fi
+				;;
+			DISCTOTAL|TOTALDISCS)  true ;;
+			EAN/UPC)               echo "EAN/UPC=$value" ;;
+			ENCODER)               true ;;
+			GENRE)                 echo "Genre=$value" ;;
+			ISRC)                  echo "ISRC=$value" ;;
+			LABELNO)               echo "Catalog=$value" ;;
+			LICENSE)               echo "License=$value" ;;
+			LOCATION)              echo "Record Location=$value" ;;
+			MD5)                   echo "MD5=$value" ;;
+			PUBLISHER)             echo "Publisher=$value" ;;
+			REPLAYGAIN_REFERENCE_LOUDNESS) echo "Replaygain_Reference_Loudness=$value" ;;
+			REPLAYGAIN_TRACK_GAIN) echo "Replaygain_Track_Gain=$value" ;;
+			REPLAYGAIN_TRACK_PEAK) echo "Replaygain_Track_Peak=$value" ;;
+			REPLAYGAIN_ALBUM_GAIN) echo "Replaygain_Album_Gain=$value" ;;
+			REPLAYGAIN_ALBUM_PEAK) echo "Replaygain_Album_Peak=$value" ;;
+			SHA1)                  echo "SHA1=$value" ;;
+			SOURCEMEDIA)           echo "Media=$value" ;;
+			SUBTITLE)              echo "Subtitle=$value" ;;
+			TITLE)                 echo "Title=$value" ;;
+			TRACKNUMBER)
+				if [ -n "$totalTracks" ]; then
+					printf 'Track=%g/%g\n' "$value" "$totalTracks"
+				else
+					printf 'Track=%g\n' "$value"
+				fi
+				;;
+			TRACKTOTAL|TOTALTRACKS) true ;;
+			*)                     echo "${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+vorbisCommentsToLAME ()
+{
+	local line field value totalTracks='' totalDiscs=''
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			DISCTOTAL|TOTALDISCS)   totalDiscs="$value" ;;
+			TRACKTOTAL|TOTALTRACKS) totalTracks="$value" ;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			ALBUM)                 echo "--tl $value" ;;
+			ALBUMARTIST|"ALBUM ARTIST")
+				echo "--tv TPE2=$value"
+				if [ "$value" = 'Various Artists' ]; then
+					echo "--tv TCMP=1" # iTunes 'compilation' frame
+				fi
+				;;
+			ARTIST)                echo "--ta $value" ;;
+			COMPOSER)              echo "--tv TCOM=$value" ;;
+			CONDUCTOR)             echo "--tv TPE3=$value" ;;
+			DATE)                  printf -- '--ty %.4s\n' "$value" ;;
+			DESCRIPTION)           echo "--tc $value" ;;
+			DISCNUMBER)
+				if [ -n "$totalDiscs" ]; then
+					printf -- '--tv TPOS=%g/%g\n' "$value" "$totalDiscs"
+				else
+					printf -- '--tv TPOS=%g\n' "$value"
+				fi
+				;;
+			DISCTOTAL|TOTALDISCS)  true ;;
+			ENCODER)               true ;;
+			GENRE)                 echo "--tg $value" ;;
+			ISRC)                  echo "--tv TSRC=$value" ;;
+			LICENSE) if [ "${value:0:7}" = 'http://' ]; then echo "--tv WCOP=$value" ; fi ;;
+			LYRICIST)              echo "--tv TEXT=$value" ;;
+			PUBLISHER)             echo "--tv TPUB=$value" ;;
+			SUBTITLE)              echo "--tv TIT3=$value" ;;
+			TITLE)                 echo "--tt $value" ;;
+			TRACKNUMBER)
+				if [ -n "$totalTracks" ]; then
+					printf -- '--tn %g/%g\n' "$value" "$totalTracks"
+				else
+					printf -- '--tn %g\n' "$value"
+				fi
+				;;
+			TRACKTOTAL|TOTALTRACKS) true ;;
+			*)                     echo "--tv TXXX=${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+vorbisCommentsToM4A ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			ALBUM)                 echo "-meta:album=$value" ;;
+			ALBUMARTIST|"ALBUM ARTIST")
+				echo "-meta-user:album artist=$value"
+				if [ "$value" = 'Various Artists' ]; then
+					echo "-meta-user:itunescompilation=1" # iTunes 'compilation' frame
+				fi
+				;;
+			ARTIST)                echo "-meta:artist=$value" ;;
+			COMPOSER)              echo "-meta:composer=$value" ;;
+			COPYRIGHT)             echo "-meta:copyright=$value" ;;
+			CRC|MD5|SHA1)          true ;;
+			DATE)                  printf -- '-meta:year=%.4s\n' "$value" ;;
+			DESCRIPTION)           echo "-meta:comment=$value" ;;
+			DISCNUMBER)            printf -- '-meta:disc=%g\n' "$value" ;;
+			DISCTOTAL|TOTALDISCS)  printf -- '-meta:totaldiscs=%g\n' "$value" ;;
+			ENCODER)               true ;;
+			GENRE)                 echo "-meta:genre=$value" ;;
+			ISRC)                  echo "-meta:isrc=$value" ;;
+			TITLE)                 echo "-meta:title=$value" ;;
+			TRACKNUMBER)           printf -- '-meta:track=%g\n' "$value" ;;
+			TRACKTOTAL|TOTALTRACKS) printf -- '-meta:totaltracks=%g\n' "$value" ;;
+			cdec|encoding*|itunnorm|itunsmpb|tool) continue ;;
+			*)                     echo "-meta-user:${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+APEv2ToVorbisComments ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			Media|Disc)
+				case "$value" in
+					[0-9]*)
+						if echo "$value" | fgrep '/' >/dev/null 2>&1; then
+							printf 'DISCTOTAL=%g\n' "${value#*/}"
+						fi
+						;;
+				esac
+				;;
+			Track)
+				if echo "$value" | fgrep '/' >/dev/null 2>&1; then
+					printf 'TRACKTOTAL=%g\n' "${value#*/}"
+				fi
+				;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			Album)                 echo "ALBUM=$value" ;;
+			Albumartist|"Album Artist") echo "ALBUMARTIST=$value" ;;
+			Artist)                echo "ARTIST=$value" ;;
+			Catalog)               echo "LABELNO=$value" ;;
+			Comment)               echo "DESCRIPTION=$value" ;;
+			Composer)              echo "COMPOSER=$value" ;;
+			Conductor)             echo "CONDUCTOR=$value" ;;
+			Copyright)             echo "COPYRIGHT=$value" ;;
+			CRC)                   echo "CRC=$value" ;;
+			EAN/UPC)               echo "EAN/UPC=$value" ;;
+			Genre)                 echo "GENRE=$value" ;;
+			ISRC)                  echo "ISRC=$value" ;;
+			License)               echo "LICENSE=$value" ;;
+			MD5)                   echo "MD5=$value" ;;
+			Media|Disc)
+				case "$value" in
+					[0-9]*)            printf 'DISCNUMBER=%g\n' "${value%/*}" ;;
+					*)                 echo "SOURCEMEDIA=$value" ;;
+				esac ;;
+			Publisher)             echo "PUBLISHER=$value" ;;
+			'Record Location')     echo "LOCATION=$value" ;;
+			Replaygain_Reference_Loudness) echo "REPLAYGAIN_REFERENCE_LOUDNESS=$value" ;;
+			Replaygain_Track_Gain) echo "REPLAYGAIN_TRACK_GAIN=$value" ;;
+			Replaygain_Track_Peak) echo "REPLAYGAIN_TRACK_PEAK=$value" ;;
+			Replaygain_Album_Gain) echo "REPLAYGAIN_ALBUM_GAIN=$value" ;;
+			Replaygain_Album_Peak) echo "REPLAYGAIN_ALBUM_PEAK=$value" ;;
+			SHA1)                  echo "SHA1=$value" ;;
+			Subtitle)              echo "SUBTITLE=$value" ;;
+			Title)                 echo "TITLE=$value" ;;
+			Track)                 printf 'TRACKNUMBER=%g\n' "${value%/*}" ;;
+			Year)                  printf 'DATE=%.4s\n' "$value" ;;
+			*)                     echo "${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+APEv2ToLAME ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			Album)                 echo "--tl $value" ;;
+			Albumartist|"Album Artist")
+				echo "--tv TPE2=$value"
+				if [ "$value" = 'Various Artists' ]; then
+					echo "--tv TCMP=1" # iTunes 'compilation' frame
+				fi
+				;;
+			Artist)                echo "--ta $value" ;;
+			Comment)               echo "--tc $value" ;;
+			Composer)              echo "--tv TCOM=$value" ;;
+			Conductor)             echo "--tv TPE3=$value" ;;
+			Genre)                 echo "--tg $value" ;;
+			ISRC)                  echo "--tv TSRC=$value" ;;
+			License) if [ "${value:0:7}" = 'http://' ]; then echo "--tv WCOP=$value" ; fi ;;
+			Media|Disc)
+				case "$value" in
+					[0-9]*)
+						if [ "$value" = "${value%/*}" ]; then
+							printf -- '--tv TPOS=%g\n' "$value"
+						else
+							printf -- '--tv TPOS=%g/%g\n' "${value%/*}" "${value#*/}"
+						fi
+						;;
+				esac
+				;;
+			Publisher)             echo "--tv TPUB=$value" ;;
+			Subtitle)              echo "--tv TIT3=$value" ;;
+			Title)                 echo "--tt $value" ;;
+			Track)
+				if [ "$value" = "${value%/*}" ]; then
+					printf -- '--tn %g\n' "$value"
+				else
+					printf -- '--tn %g/%g\n' "${value%/*}" "${value#*/}"
+				fi
+				;;
+			Year)                  printf -- '--ty %.4s\n' "$value" ;;
+			*)                     echo "--tv TXXX=${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+APEv2ToM4A ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			Media|Disc)
+				if echo "$value" | fgrep '/' >/dev/null 2>&1; then
+					printf -- '-meta:totaldiscs=%g\n' "${value#*/}"
+				fi
+				;;
+			Track)
+				if echo "$value" | fgrep '/' >/dev/null 2>&1; then
+					printf -- '-meta:totaltracks=%g\n' "${value#*/}"
+				fi
+				;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			Album)                 echo "-meta:album=$value" ;;
+			Albumartist|"Album Artist")
+				echo "-meta-user:album artist=$value"
+				if [ "$value" = 'Various Artists' ]; then
+					echo "-meta-user:itunescompilation=1" # iTunes 'compilation' frame
+				fi
+				;;
+			Artist)                echo "-meta:artist=$value" ;;
+			Comment)               echo "-meta:comment=$value" ;;
+			Composer)              echo "-meta:composer=$value" ;;
+			Copyright)             echo "-meta:copyright=$value" ;;
+			CRC|MD5|SHA1)          true ;;
+			Genre)                 echo "-meta:genre=$value" ;;
+			ISRC)                  echo "-meta:isrc=$value" ;;
+			Media|Disc)
+				case "$value" in
+					[0-9]*)            printf -- '-meta:disc=%g\n' "${value%/*}" ;;
+				esac ;;
+			Title)                 echo "-meta:title=$value" ;;
+			Track)                 printf -- '-meta:track=%g\n' "${value%/*}" ;;
+			Year)                  printf -- '-meta:year=%.4s\n' "$value" ;;
+			cdec|encoding*|itunnorm|itunsmpb|tool) continue ;;
+			*)                     echo "-meta-user:${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+M4AToM4A ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			album|artist|comment|composer|copyright|credits|disc|genre|isrc|label|lyrics|mood|rating|tempo|title|totaldiscs|totaltracks|track|url|year)
+				echo "-meta:${field}=${value}"
+				;;
+			cdec|encoding*|itunnorm|itunsmpb|tool) continue ;;
+			*) echo "-meta-user:${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+M4AToVorbisComments ()
+{
+	local line field value
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			album)                 echo "ALBUM=$value" ;;
+			"album artist")        echo "ALBUMARTIST=$value" ;;
+			artist)                echo "ARTIST=$value" ;;
+			comment)               echo "DESCRIPTION=$value" ;;
+			composer)              echo "COMPOSER=$value" ;;
+			copyright)             echo "COPYRIGHT=$value" ;;
+			disc)                  printf 'DISCNUMBER=%g\n' "$value" ;;
+			genre)                 echo "GENRE=$value" ;;
+			isrc)                  echo "ISRC=$value" ;;
+			label)                 echo "ORGANIZATION=$value" ;;
+			title)                 echo "TITLE=$value" ;;
+			totaldiscs)            printf 'DISCTOTAL=%g\n' "$value" ;;
+			totaltracks)           printf 'TRACKTOTAL=%g\n' "$value" ;;
+			track)                 printf 'TRACKNUMBER=%g\n' "$value" ;;
+			year)                  printf 'DATE=%.4s\n' "$value" ;;
+			cdec|encoding*|itunnorm|itunsmpb|tool) continue ;;
+			*)                     echo "${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+M4AToAPEv2 ()
+{
+	local line field value totalDiscs='' totalTracks=''
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			totaldiscs)            totalDiscs="$value" ;;
+			totaltracks)           totalTracks="$value" ;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			album)                 echo "Album=$value" ;;
+			"album artist")        echo "Album Artist=$value" ;;
+			artist)                echo "Artist=$value" ;;
+			comment)               echo "Comment=$value" ;;
+			composer)              echo "Composer=$value" ;;
+			copyright)             echo "Copyright=$value" ;;
+			disc)
+				if [ -n "$totalDiscs" ]; then
+					printf 'Disc=%g/%g\n' "$value" "$totalDiscs"
+				else
+					printf 'Disc=%g\n' "$value"
+				fi
+				;;
+			genre)                 echo "Genre=$value" ;;
+			isrc)                  echo "Isrc=$value" ;;
+			title)                 echo "Title=$value" ;;
+			totaldiscs|totaltracks) true ;;
+			track)
+				if [ -n "$totalTracks" ]; then
+					printf 'Track=%g/%g\n' "$value" "$totalTracks"
+				else
+					printf 'Track=%g\n' "$value"
+				fi
+				;;
+			year)                  printf 'Year=%.4s\n' "$value" ;;
+			cdec|encoding*|itunnorm|itunsmpb|tool) continue ;;
+			*)                     echo "${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+M4AToLAME ()
+{
+	local line field value totalTracks='' totalDiscs=''
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			totaldiscs)            totalDiscs="$value" ;;
+			totaltracks)           totalTracks="$value" ;;
+		esac
+	done < "$sourceTagFile"
+
+	while read line; do
+		field="${line%%=*}" ; value="${line#*=}"
+		case "$field" in
+			album)                 echo "--tl $value" ;;
+			"album artist")
+				echo "--tv TPE2=$value"
+				if [ "$value" = 'Various Artists' ]; then
+					echo "--tv TCMP=1" # iTunes 'compilation' frame
+				fi
+				;;
+			artist)                echo "--ta $value" ;;
+			comment)               echo "--tc $value" ;;
+			composer)              echo "--tv TCOM=$value" ;;
+			disc)
+				if [ -n "$totalDiscs" ]; then
+					printf -- '--tv TPOS=%g/%g\n' "$value" "$totalDiscs"
+				else
+					printf -- '--tv TPOS=%g\n' "$value"
+				fi
+				;;
+			genre)                 echo "--tg $value" ;;
+			isrc)                  echo "--tv TSRC=$value" ;;
+			title)                 echo "--tt $value" ;;
+			track)
+				if [ -n "$totalTracks" ]; then
+					printf -- '--tn %g/%g\n' "$value" "$totalTracks"
+				else
+					printf -- '--tn %g\n' "$value"
+				fi
+				;;
+			year)                  printf -- '--ty %.4s\n' "$value" ;;
+			cdec|encoding*|itunnorm|itunsmpb|tool|totaldiscs|totaltracks) continue ;;
+			*)                     echo "--tv TXXX=${field}=${value}" ;;
+		esac
+	done < "$sourceTagFile"
+}
+
+convertTags ()
+{
+	local firstLine=true nChars=0
+
+	test -e "$sourceTagFile" || return
+	destTagFile="${TDIR}/${i}.${2}.txt"
+	test -e "$destTagFile" && return
+
+	# process multi-line tags
+
+	while read line; do
+		if [ "$line" != "${line%%=*}" ]; then # new field
+			if [ $firstLine = true ]; then
+				firstLine=false
+				echo -n "$line"
+			else
+				echo -en "\n${line}"
+			fi
+		else # multi-line tag
+			echo -n "§${line}"
+		fi
+	done < "$sourceTagFile" > "${sourceTagFile}.tmp"
+	mv "${sourceTagFile}.tmp" "$sourceTagFile"
+	nChars="$( cat "$sourceTagFile" | wc -m )"
+	if [ $nChars -gt 0 ]; then
+		echo >> "$sourceTagFile"
+	fi
+
+	shopt -qs nocasematch
+	case $1 in
+		vc)
+			case $2 in
+				vc)   grep -v -i -e '^encoder=' "$sourceTagFile" > "$destTagFile" ;;
+				ape)  vorbisCommentsToAPEv2 > "$destTagFile" ;;
+				lame) vorbisCommentsToLAME > "$destTagFile" ;;
+				m4a)  vorbisCommentsToM4A > "$destTagFile" ;;
+			esac ;;
+		ape)
+			case $2 in
+				ape)  cp "$sourceTagFile" "$destTagFile" ;;
+				vc)   APEv2ToVorbisComments > "$destTagFile" ;;
+				lame) APEv2ToLAME > "$destTagFile" ;;
+				m4a)  APEv2ToM4A > "$destTagFile" ;;
+			esac ;;
+		m4a)
+			case $2 in
+				m4a)  M4AToM4A > "$destTagFile" ;;
+				ape)  M4AToAPEv2 > "$destTagFile" ;;
+				vc)   M4AToVorbisComments > "$destTagFile" ;;
+				lame) M4AToLAME > "$destTagFile" ;;
+			esac ;;
+	esac
+	shopt -qu nocasematch
+}
+
+extractFlacArtwork ()
+{
+	local blockNumber withinPictureBlock=false picType picNumber=0 picExt description pattern ec=$EX_OK
+
+	for outputCodec in $outputCodecs; do
+		case "$outputCodec" in
+			OggVorbis|WinVorbis|Opus|WavPack*|MonkeysAudio|TAK|lossyWV|lossyTAK|Musepack) continue ;; # unsupported formats
+		esac
+		pattern="x${outputCodec}Y"
+		if [ "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+			metaflac --list "$copyFile" 2>> "$errorLogFile" > "${TDIR}/${i}.flist" || return $EX_KO
+			sed -i -e 's@METADATA block #@\nMETADATA block #@' "${TDIR}/${i}.flist" # binary data can screw up the 'METADATA block #' line
+			while read line; do
+				if [ "${line:0:16}" = 'METADATA block #' ]; then
+					blockNumber="${line#*#}"
+				elif [ "$line" = 'type: 6 (PICTURE)' ]; then
+					withinPictureBlock=true
+				elif [ "${line:0:5}" = 'type:' -a $withinPictureBlock = true ]; then
+					picType="${line#* }" ; picType="${picType%% *}"
+				elif [ "${line:0:10}" = 'MIME type:' -a $withinPictureBlock = true ]; then
+					case "$line" in
+						'MIME type: image/jpeg') picExt='jpg' ;;
+						'MIME type: image/png') picExt='png' ;;
+						'MIME type: image/gif') picExt='gif' ;;
+					esac
+				elif [ "${line:0:12}" = 'description:' -a $withinPictureBlock = true ]; then
+					description="${line/description: /}"
+					if [ "$description" != 'description:' ]; then
+						echo "$description" > "${SWAPDIR}/picture-${i}-${picNumber}.txt"
+					fi
+					metaflac --block-number=$blockNumber --export-picture-to="${SWAPDIR}/picture-${i}-${picNumber}_${picType}.${picExt}" "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+					if [ $ec -eq $EX_OK ]; then
+						((picNumber++))
+					else
+						rm -rf "${SWAPDIR}/picture-${i}-${picNumber}_${picType}.${picExt}" "${SWAPDIR}/picture-${i}-${picNumber}.txt" >/dev/null 2>> "$errorLogFile"
+					fi
+					withinPictureBlock=false
+				fi
+			done < "${TDIR}/${i}.flist"
+			rm -f "${TDIR}/${i}.flist" >/dev/null 2>&1
+			return $ec
+		fi
+	done
+	return $ec
+}
+
+extractAlacArtwork ()
+{
+	local picNumber=0 pattern ec=$EX_OK
+
+	for outputCodec in $outputCodecs; do
+		case "$outputCodec" in
+			OggVorbis|WinVorbis|Opus|WavPack*|MonkeysAudio|TAK|lossyWV|lossyTAK|Musepack) continue ;; # unsupported formats
+		esac
+		pattern="x${outputCodec}Y"
+		if [ "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+			if neroAacTag -list-covers "$copyFile" 2>&1 | fgrep 'front cover #1' >/dev/null 2>&1 ; then
+				neroAacTag -write-nd-covers "-dump-cover:front:${SWAPDIR}/picture-${i}-${picNumber}_3.jpg" "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $ec -eq $EX_OK ]; then ((picNumber++)); fi
+			fi
+			if neroAacTag -list-covers "$copyFile" 2>&1 | fgrep 'back cover #1' >/dev/null 2>&1 ; then
+				neroAacTag -write-nd-covers "-dump-cover:back:${SWAPDIR}/picture-${i}-${picNumber}_4.jpg" "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+			return $ec
+		fi
+	done
+	return $ec
+}
+
+importArtworkIntoFLAC ()
+{
+	local ec=$EX_OK picType description='' descFile='' pattern
+
+	pattern="x${outputCodec}Y"
+	if [ "$preserveMetadata" = "${preserveMetadata//$pattern/@}" ]; then
+		return $EX_OK
+	fi
+
+	for f in "${SWAPDIR}/picture-${i}-"*_*; do
+		if [ ! -e "$f" ]; then continue; fi
+		picType="${f#*_}"; picType="${picType%.*}"; descFile="${f%_*}.txt"
+		if [ -f "$descFile" ]; then
+			description="$( cat "$descFile" )"; description="${description//|//}" # replace | with /
+		else
+			description=''
+		fi
+		metaflac --import-picture-from="${picType}||${description}||${f}" "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+	done
+	return $ec
+}
+
+importArtworkIntoM4A ()
+{
+	local ec=$EX_OK picType picTypeText pattern
+
+	pattern="x${outputCodec}Y"
+	if [ "$preserveMetadata" = "${preserveMetadata//$pattern/@}" ]; then
+		return $EX_OK
+	fi
+
+	for f in "${SWAPDIR}/picture-${i}-"*_*; do
+		if [ ! -e "$f" ]; then continue; fi
+		picType="${f#*_}"; picType="${picType%.*}"
+		case $picType in
+			3) picTypeText='front' ;;
+			4) picTypeText='back' ;;
+			*) continue ;;
+		esac
+		if which 'neroAacTag' >/dev/null 2>&1; then
+			neroAacTag "-add-cover:${picTypeText}:${f}" -write-nd-covers "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+		else
+			cd "$SWAPDIR"
+			WINEPREFIX="$aacWinePrefix" $aacWineExe neroAacTag "-add-cover:${picTypeText}:${f}" -write-nd-covers "${i}.${destExtension}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			cd "$OLDPWD"
+		fi
+	done
+	return $ec
+}
+
+importArtworkIntoMP3 ()
+{
+	local ec=$EX_OK picType picTypeText pattern
+
+	pattern="x${outputCodec}Y"
+	if [ "$preserveMetadata" = "${preserveMetadata//$pattern/@}" ]; then
+		return $EX_OK
+	fi
+
+	which 'eyeD3' >/dev/null 2>&1 || return $EX_OK
+	for f in "${SWAPDIR}/picture-${i}-"*_*; do
+		if [ ! -e "$f" ]; then continue; fi
+		picType="${f#*_}"; picType="${picType%.*}"
+		case $picType in
+			0) picTypeText='OTHER' ;;
+			1) picTypeText='ICON' ;;
+			2) picTypeText='OTHER_ICON' ;;
+			3) picTypeText='FRONT_COVER' ;;
+			4) picTypeText='BACK_COVER' ;;
+			5) picTypeText='LEAFLET' ;;
+			6) picTypeText='MEDIA' ;;
+			7) picTypeText='LEAD_ARTIST' ;;
+			8) picTypeText='ARTIST' ;;
+			9) picTypeText='CONDUCTOR' ;;
+			10) picTypeText='BAND' ;;
+			11) picTypeText='COMPOSER' ;;
+			12) picTypeText='LYRICIST' ;;
+			13) picTypeText='RECORDING_LOCATION' ;;
+			14) picTypeText='DURING_RECORDING' ;;
+			15) picTypeText='DURING_PERFORMANCE' ;;
+			16) picTypeText='VIDEO' ;;
+			17) picTypeText='BRIGHT_COLORED_FISH' ;;
+			18) picTypeText='ILLUSTRATION' ;;
+			19) picTypeText='BAND_LOGO' ;;
+			20) picTypeText='PUBLISHER_LOGO' ;;
+			*) continue ;;
+		esac
+		eyeD3 --no-tagging-time-frame --add-image="${f}:${picTypeText}" "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+	done
+	return $ec
+}
+
+computeCRC ()
+{
+	local hfile="$1" fifo dgst
+	fifo="${TDIR}/${i}.fifo"; mkfifo "$fifo"
+	shncat -q -e "$hfile" > "$fifo" &
+	dgst="$( cksfv -b "$fifo" | fgrep -v ';' )"
+	echo -n "CRC=${dgst##* }"
+}
+
+computeMD5 ()
+{
+	local wavFile="$1" dgst
+	dgst="$( shnhash -q -m "$wavFile" )"
+	dgst="${dgst%% *}"
+	echo -n "MD5=${dgst}"
+}
+
+computeSHA1 ()
+{
+	local wavFile="$1" dgst
+	dgst="$( shnhash -q -s "$wavFile" )"
+	echo -n "SHA1=${dgst%% *}"
+}
+
+filterApetagOutput ()
+{
+	local nLines nTail
+
+	test -f "$sourceTagFile" || return $EX_KO
+	nLines="$( cat "$sourceTagFile" | wc -l | tr -d ' ' )"
+	nTail=$(( nLines - 2 ))
+	if [ $nTail -gt 0 ]; then
+		tail -n $nTail "$sourceTagFile" > "${sourceTagFile}.tmp"
+		mv "${sourceTagFile}.tmp" "$sourceTagFile"
+	else
+		rm -f "$sourceTagFile"
+		touch "$sourceTagFile"
+	fi
+}
+
+extractAlacMetadata ()
+{
+	local startParsing=false ec=$EX_OK
+
+	neroAacTag -list-meta "$copyFile" > "$sourceTagFile" 2>&1 || ec=$EX_KO
+	if [ $ec -ne $EX_OK ]; then
+		cat "$sourceTagFile" >> "$errorLogFile"
+		return $EX_KO
+	fi
+
+	while read line; do
+		if [ "$line" = 'Metadata list:' ]; then
+			startParsing=true
+			continue
+		elif [ "$line" = 'End of metadata.' ]; then
+			break
+		elif [ $startParsing = false ]; then
+			continue
+		elif [ "${line#* = }" != "$line" ]; then
+			line="${line/ = /=}" ; echo "$line"
+		else
+			echo "$line"
+		fi
+	done < "$sourceTagFile" > "${sourceTagFile}.tmp"
+	mv "${sourceTagFile}.tmp" "$sourceTagFile"
+}
+
+saveDurations ()
+{
+	local samples sampleRate duration hours minutes seconds centiseconds f
+
+	case "$copyFile" in
+		*.flac)
+			samples="$( metaflac --show-total-samples "$copyFile" 2>> "$errorLogFile" )"
+			sampleRate="$( metaflac --show-sample-rate "$copyFile" 2>> "$errorLogFile" )"
+			if [ -n "$samples" -a -n "$sampleRate" ]; then
+				duration="$( echo "scale=3; $samples / $sampleRate" | bc )"
+				echo -n " + $duration" >> "${TDIR}/durations"
+			fi
+			return
+			;;
+
+		*.wv)
+			duration="$( wvunpack -s "$copyFile" 2>> "$errorLogFile" | fgrep 'duration:' | cut -d ':' -f 2- | tr -d ' ' )"
+			if [ -n "$duration" ]; then
+				hours="${duration%%:*}" ; hours="${hours#0}"
+				minutes="${duration%:*}" ; minutes="${minutes#*:}" ; minutes="${minutes#0}"
+				seconds="${duration##*:}"
+				centiseconds="${seconds#*.}"
+				seconds="${seconds%.*}" ; seconds="${seconds#0}"
+				seconds=$(( (hours * 3600) + (minutes * 60) + seconds ))
+				echo -n " + ${seconds}.${centiseconds}" >> "${TDIR}/durations"
+			fi
+			return
+			;;
+
+		*.tak)
+			cd "$SWAPDIR"
+			seconds="$( WINEPREFIX="$takWinePrefix" $takWineExe takc -fim2 ".\\$sourceFilename" 2>/dev/null | fgrep 'File duration:' | tr -d ' \r' | cut -d ':' -f 2 )"
+			seconds="${seconds%sec}"
+			cd "$OLDPWD"
+			echo -n " + ${seconds}" >> "${TDIR}/durations"
+			return
+			;;
+
+		*.ape) f="$copyFile" ;;
+		*) f="$wavFile" ;;
+	esac
+
+	duration="$( shninfo "$f" 2>> "$errorLogFile" | fgrep 'Length:' | cut -d ':' -f 2- | tr -d ' ' )"
+	if [ -n "$duration" ]; then
+		duration="${duration##* }"
+		minutes="${duration%:*}" ; minutes="${minutes#0}"
+		seconds="${duration#*:}"
+		milliseconds="${seconds#*.}" ; milliseconds="${milliseconds#0}"
+		seconds="${seconds%.*}" ; seconds="${seconds#0}"
+		seconds=$(( (minutes * 60) + seconds ))
+		if [ "${milliseconds:2:1}" = '' ]; then # CD frames, i.e. <= 75
+			milliseconds=$(( milliseconds * 100 / 75 ))
+		fi
+		duration="${seconds}.$milliseconds"
+		echo -n " + $duration" >> "${TDIR}/durations"
+	fi
+}
+
+decode ()
+{
+	local ec=$EX_OK sourceTagFormat hline samples sampleRate duration hours minutes seconds centiseconds pattern
+
+	if [ -e "$copyFile" ]; then
+		case "$sourceExtension" in
+			wav)
+				sourceTagFormat='vc'
+				mv "$copyFile" "$wavFile" >/dev/null 2>&1 || ec=$EX_KO
+				;;
+
+			flac)
+				sourceTagFormat='vc'
+				flac -s -d -o "$wavFile" "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				metaflac --no-utf8-convert --export-tags-to="$sourceTagFile" "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				extractFlacArtwork || ec=$EX_KO
+				;;
+
+			wv)
+				sourceTagFormat='ape'
+				wvunpack -qwmo "$wavFile" "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@ / @g' -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' > "$sourceTagFile" &&
+				filterApetagOutput || ec=$EX_KO
+				;;
+
+			ape)
+				sourceTagFormat='ape'
+				mac "$copyFile" "$wavFile" -d >/dev/null 2>> "$errorLogFile" &&
+				apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@, @g' | sed -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' > "$sourceTagFile" &&
+				filterApetagOutput || ec=$EX_KO
+				;;
+
+			tak)
+				sourceTagFormat='ape'
+				cd "$SWAPDIR" &&
+				WINEPREFIX="$takWinePrefix" $takWineExe takc -d -md5 ".\\${sourceFilename}" ".\\${i}.wav" >/dev/null 2>> "$errorLogFile" &&
+				cd "$OLDPWD" &&
+				apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@, @g' | sed -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' > "$sourceTagFile" &&
+				filterApetagOutput || ec=$EX_KO
+				;;
+
+			m4a)
+				sourceTagFormat='m4a'
+				alac -f "$wavFile" "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				extractAlacMetadata &&
+				extractAlacArtwork || ec=$EX_KO
+				;;
+
+			*) ec=$EX_KO ;;
+		esac
+
+		if [ $sourceIsLossyWAV = true ]; then
+			ln -s "${i}.wav" "${SWAPDIR}/${i}.lossy.wav" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+		fi
+	else
+		ec=$EX_KO
+	fi
+
+	if [ $ec -eq $EX_OK ]; then
+		saveDurations
+
+		if [ -n "$bitDepth" -o -n "$samplingRate" ]; then
+			if [ -n "$bitDepth" -a -n "$samplingRate" ]; then
+				sox -G "$wavFile" -b $bitDepth "$resampledWavFile" rate -v $samplingRate dither -a -s >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			elif [ -n "$bitDepth" ]; then
+				sox -G "$wavFile" -b $bitDepth "$resampledWavFile" dither -a -s >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			elif [ -n "$samplingRate" ]; then
+				sox -G "$wavFile" "$resampledWavFile" rate -v $samplingRate dither -a -s >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+			if [ $ec -eq $EX_OK -a -f "$resampledWavFile" ]; then
+				mv -f "$resampledWavFile" "$wavFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+		fi
+	else
+		rm -f "$wavFile" "$lossywavFile" # in case it exists
+		rm -f "${TDIR}/"*"_${i}" # delete all codec lock files
+		rm -f "${TDIR}/"*"_${i}_WAV_NEEDED" # delete associated lock files
+		printf "${GR}%2u ${KO}DC ${CY}%s${NM}\n" $p "$sourceFilename" 1>&2
+		return $EX_KO
+	fi
+
+	if [ "$OS" = 'Linux' ]; then
+		stat -L --printf ' + %s' "$wavFile" >> "${TDIR}/bytes" 2>> "$errorLogFile"
+	else
+		stat -L -n -f ' + %z' "$wavFile" >> "${TDIR}/bytes" 2>> "$errorLogFile"
+	fi
+
+	for h in $hashes; do
+		case $h in
+			CRC) hline="$( computeCRC "$wavFile" )" ;;
+			MD5) hline="$( computeMD5 "$wavFile" )" ;;
+			SHA1) hline="$( computeSHA1 "$wavFile" )" ;;
+		esac
+		if [ -f "$sourceTagFile" ]; then
+			egrep -v "^${h}=" "$sourceTagFile" > "${sourceTagFile}.tmp" # purge former hash tag
+			mv -f "${sourceTagFile}.tmp" "$sourceTagFile"
+		fi
+
+		echo "$hline" >> "$sourceTagFile"
+	done
+
+	for outputCodec in $outputCodecs; do
+		pattern="x${outputCodec}Y"
+		if [ "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+			case "$outputCodec" in
+				FLAC|Flake|lossyFLAC|OggVorbis|WinVorbis|Opus) convertTags $sourceTagFormat 'vc' ;;
+				WavPack*|MonkeysAudio|TAK|lossyWV|lossyTAK|Musepack) convertTags $sourceTagFormat 'ape' ;;
+				LAME|WinLAME) convertTags $sourceTagFormat 'lame' ;;
+				AAC|WinAAC|ALAC) convertTags $sourceTagFormat 'm4a' ;;
+			esac
+		fi
+	done
+
+	return $ec
+}
+
+encodeLossyWAV ()
+{
+	local ec=$EX_OK
+
+	if [ ! -e "$lossywavFile" ]; then
+		cd "$SWAPDIR"
+		WINEPREFIX="$lossywavWinePrefix" $lossywavWineExe lossyWAV "${i}.wav" -q $compression_lossyWAV >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+		cd "$OLDPWD"
+	fi
+
+	encodedFile="${SWAPDIR}/${i}.lossy.wav"
+	destFilename="${sourceBasename}.lossy.wav"
+	destFile="${destDir}/${destFilename}"
+	if [ $ec -eq $EX_OK ]; then
+		if [ $copyLossyWAV = true ]; then
+			chmod 0644 "$encodedFile"
+			cp "$encodedFile" "$destFile" >/dev/null 2>> "$errorLogFile"
+			if [ $verbose = true ]; then
+				printf "${GR}%2u ${OK}OK ${CY}%s${NM}\n" $p "$destFilename"
+			fi
+		fi
+	else
+		rm -f "$lossywavFile" # delete lossyWAV file if it exists
+		rm -f "${TDIR}/lossy"*"_${i}" # delete all lossy* codec lock files
+		rm -f "${TDIR}/"*"_${i}_LOSSYWAV_NEEDED" # delete associated codec lock files
+		rm -f "${TDIR}/lossyWAV_${i}_WAV_NEEDED"
+		printf "${GR}%2u ${KO}ER ${CY}%s${NM}\n" $p "$destFilename" 1>&2
+	fi
+
+	return $ec
+}
+
+encode ()
+{
+	local ec=$EX_OK pattern="x${outputCodec}Y"
+
+	case "$outputCodec" in
+		WAV)
+			if [ $sourceIsLossyWAV = true ]; then
+				destExtension='lossy.wav'; encodedFile="$lossywavFile"
+			else
+				destExtension='wav'; encodedFile="$wavFile"
+			fi
+			;;
+
+		FLAC)
+			destExtension='flac'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			printf -- "-s`tagline -T`\x00%s" "$wavFile" | xargs -0 flac -P 4096 -${compression_FLAC} -o "$encodedFile" >/dev/null 2>> "$errorLogFile" &&
+			importArtworkIntoFLAC || ec=$EX_KO
+			;;
+
+		Flake)
+			destExtension='flac'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			flake -q -p 4096 -${compression_Flake} "$wavFile" -o "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			if [ $ec -eq $EX_OK -a "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+				if [ -f "$destTagFile" ]; then
+					printf -- "--no-utf8-convert`tagline --set-tag`\x00%s" "$encodedFile" | xargs -0 metaflac >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+				test $ec -eq $EX_OK && importArtworkIntoFLAC || ec=$EX_KO
+			fi
+			;;
+
+		WavPack)
+			destExtension='wv'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			if [ -z "$compression_WavPack" ]; then # WavPack's default is no compression settings
+				printf -- "-q`tagline -w`\x00%s" "$wavFile" | xargs -0 wavpack -m -o "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			else
+				printf -- "-q`tagline -w`\x00%s" "$wavFile" | xargs -0 wavpack -m -o "$encodedFile" -${compression_WavPack} >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+			;;
+
+		WavPackHybrid)
+			destExtension='wv'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			printf -- "-q`tagline -w`\x00%s" "$wavFile" | xargs -0 wavpack -m -o "$encodedFile" -b${bitrate_WavPackLossy} -c${compression_WavPack} >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		WavPackLossy)
+			destExtension='wv'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			if [ -z "$compression_WavPack" ]; then # WavPack's default is no compression settings
+				printf -- "-q`tagline -w`\x00%s" "$wavFile" | xargs -0 wavpack -o "$encodedFile" -b${bitrate_WavPackLossy} >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			else
+				printf -- "-q`tagline -w`\x00%s" "$wavFile" | xargs -0 wavpack -o "$encodedFile" -b${bitrate_WavPackLossy} -${compression_WavPack} >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+			;;
+
+		MonkeysAudio)
+			destExtension='ape'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			mac "$wavFile" "$encodedFile" -c${compression_MonkeysAudio}000 >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			if [ $ec -eq $EX_OK -a "$preserveMetadata" != "${preserveMetadata//$pattern/@}" -a -f "$destTagFile" ]; then
+				printf -- "-m\x00overwrite`tagline -p`" | xargs -0 apetag -i "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			fi
+			;;
+
+		TAK)
+			destExtension='tak'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			cd "$SWAPDIR"
+			printf -- "-md5`tagline -tt`\x00%s\x00%s" ".\\${i}.wav" ".\\${i}.${destExtension}" | WINEPREFIX="$takWinePrefix" xargs -0 $takWineExe takc -e -p${compression_TAK} -tn1 >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			cd "$OLDPWD"
+			;;
+
+		ALAC)
+			destExtension='m4a'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.m4a.txt"
+			# nohup is needed because ffmpeg messes with the terminal somehow
+			nohup ffmpeg -v quiet -i "$wavFile" -acodec alac "$encodedFile" > "${TDIR}/${i}.out" 2>> "$errorLogFile" &&
+			rm -f "${TDIR}/${i}.out" >/dev/null 2>&1 || ec=$EX_KO
+			if [ $ec -eq $EX_OK -a "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+				if [ -f "$destTagFile" ]; then
+					printf -- "%s`tagline`" "$encodedFile" | xargs -0 neroAacTag >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+				test $ec -eq $EX_OK && importArtworkIntoM4A || ec=$EX_KO
+			fi
+			;;
+
+		lossyFLAC)
+			destExtension='lossy.flac'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			printf -- "--totally-silent`tagline -T`\x00%s" "$lossywavFile" | xargs -0 flac -P 4096 -5 -b 512 --keep-foreign-metadata -o "$encodedFile" >/dev/null 2>> "$errorLogFile" &&
+			importArtworkIntoFLAC || ec=$EX_KO
+			;;
+
+		lossyWV)
+			destExtension='lossy.wv'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			printf -- "-q`tagline -w`\x00%s" "$lossywavFile" | xargs -0 wavpack -m -o "$encodedFile" --blocksize=512 >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		lossyTAK)
+			destExtension='lossy.tak'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			cd "$SWAPDIR"
+			printf -- "-md5`tagline -tt`\x00%s\x00%s" ".\\${i}.lossy.wav" ".\\${i}.${destExtension}" | WINEPREFIX="$takWinePrefix" xargs -0 $takWineExe takc -e -p2 -tn1 -fsl512 >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			cd "$OLDPWD"
+			;;
+
+		OggVorbis)
+			destExtension='ogg'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			printf -- "-Q`tagline -c`\x00%s" "$wavFile" | xargs -0 oggenc -q $compression_OggVorbis -o "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		WinVorbis)
+			destExtension='ogg'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			cd "$SWAPDIR"
+			printf -- "-Q`tagline -c`\x00%s" "${i}.wav" | WINEPREFIX="$oggencWinePrefix" xargs -0 $oggencWineExe oggenc2 -q $compression_OggVorbis -o "${i}.${destExtension}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			cd "$OLDPWD"
+			;;
+
+		LAME)
+			destExtension='mp3'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.lame.txt"
+			if [ "$LAME_MODE" = 'VBR' ]; then
+				printf -- "-o`tagline`\x00%s\x00%s" "$wavFile" "$encodedFile" | xargs -0 lame -S -V $compression_LAME --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			else
+				if [ $bitrate_LAME -eq 320 ]; then
+					printf -- "-o`tagline`\x00%s\x00%s" "$wavFile" "$encodedFile" | xargs -0 lame -S --preset insane --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				else
+					printf -- "-o`tagline`\x00%s\x00%s" "$wavFile" "$encodedFile" | xargs -0 lame -S -b $bitrate_LAME --cbr --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+			fi
+			test $ec -eq $EX_OK && importArtworkIntoMP3 || ec=$EX_KO
+			;;
+
+		WinLAME)
+			destExtension='mp3'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.lame.txt"
+			cd "$SWAPDIR"
+			if [ "$LAME_MODE" = 'VBR' ]; then
+				printf -- "-o`tagline`\x00%s\x00%s" "${i}.wav" "${i}.${destExtension}" | WINEPREFIX="$lameWinePrefix" xargs -0 $lameWineExe lame -S -V $compression_LAME --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			else
+				if [ $bitrate_LAME -eq 320 ]; then
+					printf -- "-o`tagline`\x00%s\x00%s" "${i}.wav" "${i}.${destExtension}" | WINEPREFIX="$lameWinePrefix" xargs -0 $lameWineExe lame -S --preset insane --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				else
+					printf -- "-o`tagline`\x00%s\x00%s" "${i}.wav" "${i}.${destExtension}" | WINEPREFIX="$lameWinePrefix" xargs -0 $lameWineExe lame -S -b $bitrate_LAME --cbr --noreplaygain --id3v2-only --ignore-tag-errors >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+			fi
+			cd "$OLDPWD"
+			test $ec -eq $EX_OK && importArtworkIntoMP3 || ec=$EX_KO
+			;;
+
+		AAC)
+			destExtension='m4a'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.m4a.txt"
+			neroAacEnc -q $compression_AAC '-if' "$wavFile" -of "$encodedFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			if [ $ec -eq $EX_OK -a "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+				if [ -f "$destTagFile" ]; then
+					printf -- "%s`tagline`" "$encodedFile" | xargs -0 neroAacTag >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+				test $ec -eq $EX_OK && importArtworkIntoM4A || ec=$EX_KO
+			fi
+			;;
+
+		WinAAC)
+			destExtension='m4a'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.m4a.txt"
+			cd "$SWAPDIR"
+			WINEPREFIX="$aacWinePrefix" $aacWineExe neroAacEnc -q $compression_AAC '-if' "${i}.wav" -of "${i}.${destExtension}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			if [ $ec -eq $EX_OK -a "$preserveMetadata" != "${preserveMetadata//$pattern/@}" ]; then
+				if [ -f "$destTagFile" ]; then
+					printf -- "%s`tagline`" "${i}.${destExtension}" | WINEPREFIX="$aacWinePrefix" xargs -0 $aacWineExe neroAacTag >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+				test $ec -eq $EX_OK && importArtworkIntoM4A || ec=$EX_KO
+			fi
+			cd "$OLDPWD"
+			;;
+
+		Musepack)
+			destExtension='mpc'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.ape.txt"
+			printf -- "--silent`tagline --tag`\x00%s\x00%s" "$wavFile" "$encodedFile" | xargs -0 mpcenc --quality ${compression_Musepack} >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		Opus)
+			destExtension='opus'; encodedFile="${SWAPDIR}/${i}.${destExtension}" destTagFile="${TDIR}/${i}.vc.txt"
+			printf -- "--quiet`tagline --comment`\x00%s\x00%s" "$wavFile" "$encodedFile" | xargs -0 opusenc --bitrate $bitrate_Opus >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+	esac
+
+	destFilename="${sourceBasename}.${destExtension}"
+	destFile="${destDir}/${destFilename}"
+
+	if [ $ec -eq $EX_OK ]; then
+		chmod 0644 "$encodedFile"
+		if [ -L "$encodedFile" -o "$outputCodec" = 'WAV' ]; then
+			cp "$encodedFile" "$destFile" >/dev/null 2>> "$errorLogFile"
+		else
+			mv "$encodedFile" "$destFile" >/dev/null 2>> "$errorLogFile"
+		fi
+		test -e "${encodedFile}c" && mv "${encodedFile}c" "${destFile}c" >/dev/null 2>> "$errorLogFile" # WavPack Hybrid correction files
+		if [ $verbose = true ]; then
+			printf "${GR}%2u ${OK}OK ${CY}%s${NM}\n" $p "$destFilename"
+		fi
+	else
+		rm -f "$encodedFile" >/dev/null 2>&1 # in case it exists
+		printf "${GR}%2u ${KO}ER ${CY}%s${NM}\n" $p "$destFilename" 1>&2
+	fi
+
+	return $ec
+}
+
+prepareSource ()
+{
+	local sourcePath copyDone=false ec=$EX_OK cptimer1 cptimer2 cpseconds copyLockFile
+
+	if [ $preloadSources = true ]; then
+		if [ "$OS" = 'Linux' ]; then
+			copyLockFile="${iodir}/$( stat -c '%d' "$sourceFile" 2>> "$errorLogFile" )"
+		else
+			copyLockFile="${iodir}/$( stat -f '%d' "$sourceFile" 2>> "$errorLogFile" )"
+		fi
+		until test $copyDone = true; do
+			if test -f "$copyLockFile" && mv "$copyLockFile" "${copyLockFile}.lock" >/dev/null 2>&1; then
+				touch "${instanceDir}/ioLockFiles/${copyLockFile##*/}"
+
+				if [ "$OS" = 'Linux' ]; then
+					cptimer1="$( date '+%s.%N' )"
+				fi
+
+				cp "$sourceFile" "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ -e "${sourceFile}c" ]; then # WavPack correction file
+					cp "${sourceFile}c" "${copyFile}c" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+
+				mv "${copyLockFile}.lock" "$copyLockFile" >/dev/null 2>&1 &&
+				rm -f "${instanceDir}/ioLockFiles/${copyLockFile##*/}" >/dev/null 2>&1
+				copyDone=true
+
+				if [ "$OS" = 'Linux' ]; then
+					cptimer2="$( date '+%s.%N' )"
+					cpseconds="$( printf 'scale=6; %.6f - %.6f\n' "$cptimer2" "$cptimer1" | bc )"
+					echo -n " + $cpseconds" >> "${TDIR}/readTimes"
+				fi
+			else
+				sleep 0.1
+			fi
+		done
+	else
+		if [ "$OS" = 'Linux' ]; then
+			sourcePath="$( readlink -f "$sourceFile" 2>> "$errorLogFile" )"
+		else
+			if [ "${sourceFile:0:1}" = '/' ]; then
+				sourcePath="$sourceFile"
+			else
+				sourcePath="${PWD}/${sourceFile}"
+			fi
+		fi
+		ln -s "$sourcePath" "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+		if [ -e "${sourcePath}c" ]; then # WavPack correction file
+			ln -s "${sourcePath}c" "${copyFile}c" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+		fi
+	fi
+
+	if [ $ec -ne $EX_OK ]; then
+		rm -f "$copyFile" "${copyFile}c" >/dev/null 2>&1
+	fi
+	return $ec
+}
+
+transcode ()
+{
+	local lastCodec="${outputCodecs##* }" allDone=false copyDone=false encodingDone=false ec=$EX_OK lsec=0
+
+	until test $allDone = true; do
+		allDone=true
+		for ((i=0; i<${#sourceFiles[@]}; i++)); do
+			sourceFile="${sourceFiles[$i]}"
+			sourceFilename="${sourceFile##*/}"
+			sourceBasename="${sourceFilename%.*}"
+			if [ "$sourceBasename" != "${sourceBasename%.lossy}" ]; then
+				sourceIsLossyWAV=true
+			else
+				sourceIsLossyWAV=false
+			fi
+			sourceBasename="${sourceBasename%.lossy}";
+			sourceExtension="${sourceFilename##*.}"
+			copyFile="${SWAPDIR}/${sourceFilename}"
+
+			transcodingLockFile="${TDIR}/${i}"
+			decodingLockFile="${TDIR}/DECODING_${i}"
+			wavFile="${SWAPDIR}/${i}.wav"
+			resampledWavFile="${SWAPDIR}/${i}_resampled.wav"
+			lossywavFile="${SWAPDIR}/${i}.lossy.wav"
+			sourceTagFile="${TDIR}/${i}.txt"
+			trackGainFile="${TDIR}/${i}.trackgain"
+			trackPeakFile="${TDIR}/${i}.trackpeak"
+			secondsFile="${TDIR}/${i}.seconds"
+
+			if test -e "$transcodingLockFile" && mv "$transcodingLockFile" "$decodingLockFile" 2>/dev/null; then
+				allDone=false
+				prepareSource &&
+				decode || ec=$EX_KO
+				rm -f "$decodingLockFile" "$copyFile" "${copyFile}c" >/dev/null 2>&1
+			elif [ -e "$decodingLockFile" ]; then # can't do anything for this track yet, gotta wait for it to be decoded
+				allDone=false
+				continue # skip to next track
+			fi
+
+			lossywavLockFile="${TDIR}/lossyWAV_${i}"
+			lossywavEncodingLockFile="${lossywavLockFile}_encoding"
+			if [ $nLossyWAV -ge 1 ]; then
+				if test -e "$lossywavLockFile" && mv "$lossywavLockFile" "$lossywavEncodingLockFile" 2>/dev/null ; then
+					allDone=false
+					encodeLossyWAV || ec=$EX_KO
+					rm -f "$lossywavEncodingLockFile" "${lossywavLockFile}_WAV_NEEDED"
+					ls "${TDIR}/"*"_${i}_WAV_NEEDED" >/dev/null 2>&1 || rm -f "$wavFile"
+					ls "${TDIR}/"*"_${i}_LOSSYWAV_NEEDED" >/dev/null 2>&1 || rm -f "$lossywavFile"
+				fi
+			fi
+
+			for outputCodec in $outputCodecs; do
+				test "$outputCodec" = 'lossyWAV' && continue
+				if [ "$outputCodec" = 'lossyFLAC' -o "$outputCodec" = 'lossyWV' -o "$outputCodec" = 'lossyTAK' ]; then
+					if [ -e "$lossywavEncodingLockFile" ]; then # lossyWAV encoding in progress, skip to next codec
+						allDone=false
+						continue
+					fi
+				fi
+				encodingLockFile="${TDIR}/${outputCodec}_${i}"
+				if test -e "$encodingLockFile" && unlink "$encodingLockFile" 2>/dev/null; then
+					allDone=false
+					encode || ec=$EX_KO
+					rm -f "${encodingLockFile}_WAV_NEEDED"
+					ls "${TDIR}/"*"_${i}_WAV_NEEDED" >/dev/null 2>&1 || rm -f "$wavFile"
+					if [ "$outputCodec" = 'lossyFLAC' -o "$outputCodec" = 'lossyWV' -o "$outputCodec" = 'lossyTAK' ]; then
+						rm -f "${encodingLockFile}_LOSSYWAV_NEEDED"
+						ls "${TDIR}/"*"_${i}_LOSSYWAV_NEEDED" >/dev/null 2>&1 || rm -f "$lossywavFile"
+					fi
+				fi
+			done
+
+			if ! ls "${TDIR}/"*"_${i}_LOSSYWAV_NEEDED" >/dev/null 2>&1 ; then
+				if ! ls "${TDIR}/"*"_${i}_WAV_NEEDED" >/dev/null 2>&1 ; then
+					ls "${SWAPDIR}/picture-${i}"* >/dev/null 2>&1 &&
+					rm -f "${SWAPDIR}/picture-${i}"* >/dev/null 2>&1
+				fi
+			fi
+		done
+		sleep 0.1 # make sure idling processes don't hog the CPU
+	done
+
+	rm -f "${instanceDir}/process.${p}"
+	return $ec
+}
+
+testFile ()
+{
+	local ec=$EX_OK
+
+	if [ -e "$copyFile" ]; then
+		case "$copyFile" in
+			*.flac)
+				flac -st "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				saveDurations || ec=$EX_KO
+				;;
+
+			*.wv)
+				wvunpack -qmv "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+				saveDurations || ec=$EX_KO
+				;;
+
+			*.ape)
+				mac "$copyFile" -v >/dev/null 2>> "$errorLogFile" &&
+				saveDurations || ec=$EX_KO
+				;;
+
+			*.tak)
+				cd "$SWAPDIR"
+				WINEPREFIX="$takWinePrefix" $takWineExe takc -t ".\\${sourceFilename}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				cd "$OLDPWD"
+				;;
+
+			*) printf "${GR}%2u ${WG}WG ${CY}%s${NM}: unsupported format\n" $p "$sourceFilename" 1>&2; return $EX_KO ;;
+		esac
+	else
+		ec=$EX_KO
+	fi
+
+	if [ $ec -eq $EX_OK ]; then
+		if [ $verbose = true ]; then
+			printf "${GR}%2u ${OK}OK ${CY}%s${NM}\n" $p "$sourceFilename"
+		fi
+	else
+		printf "${GR}%2u ${KO}ER ${CY}%s${NM}\n" $p "$sourceFilename" 1>&2
+	fi
+	return $ec
+}
+
+testFiles ()
+{
+	local ec=$EX_OK
+	for ((i=0; i<${#sourceFiles[@]}; i++)); do
+		sourceFile="${sourceFiles[$i]}"
+		sourceFilename="${sourceFile##*/}"
+		copyFile="${SWAPDIR}/${sourceFilename}"
+		testingLockFile="${TDIR}/${i}"
+
+		if unlink "$testingLockFile" 2>/dev/null; then
+			prepareSource &&
+			testFile || ec=$EX_KO
+			rm -f "$copyFile" "${copyFile}c" >/dev/null 2>&1
+		fi
+	done
+
+	rm -f "${instanceDir}/process.${p}"
+	return $ec
+}
+
+replaygainToSoundcheckGain ()
+{
+	local rg="$1" base="$2" a b c scg
+
+	a="$( echo "scale=5; -0.1 * $rg" | bc )"
+	b="$( awk "BEGIN{print 10^${a}}" )"
+	c="$( echo "scale=5; $base * $b" | bc )"
+	scg="$( printf "%.0f" "$c" )"
+	if [ $scg -gt 65534 ]; then
+		scg=65534
+	fi
+	printf "%08X" "$scg"
+}
+
+getSoundcheck ()
+{
+	local rg="$1"
+	scg1="$( replaygainToSoundcheckGain "$rg" 1000 )"
+	scg2="$( replaygainToSoundcheckGain "$rg" 2500 )"
+
+	echo " $scg1 $scg1 $scg2 $scg2 00024CA8 00024CA8 00007FFF 00007FFF 00024CA8 00024CA8"
+}
+
+saveGain ()
+{
+	local gainType="$1" gainTypeText ec=$EX_OK gain peak uGain
+
+	if [ "$gainType" = 'TRACK' ]; then
+		gain="$trackGain" peak="$trackPeak" uGain="$trackGain"
+	else
+		gain="$albumGain" peak="$albumPeak" uGain="$albumGain"
+	fi
+
+	if [ "${gain:0:1}" != '-' ]; then
+		gain="+${gain}"
+	fi
+
+	case "$destFile" in
+		*.flac)
+			metaflac --remove-tag="REPLAYGAIN_${gainType}_GAIN" --remove-tag="REPLAYGAIN_${gainType}_PEAK" \
+				--set-tag="REPLAYGAIN_${gainType}_GAIN=${gain} dB" --set-tag="REPLAYGAIN_${gainType}_PEAK=${peak}" "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		*.wv)
+			if [ "$gainType" = 'TRACK' ]; then
+				return $EX_OK
+			fi
+			destTagFile="${TDIR}/${i}.ape.txt"
+			echo "Replaygain_Album_Gain=${gain} dB" >> "$destTagFile"
+			echo "Replaygain_Album_Peak=${peak}" >> "$destTagFile"
+			printf -- "-m\x00overwrite`tagline -p`" | xargs -0 apetag -i "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		*.ape|*.tak)
+			destTagFile="${TDIR}/${i}.ape.txt"
+			if [ "$gainType" = 'TRACK' ]; then
+				gainTypeText='Track'
+			else
+				gainTypeText='Album'
+			fi
+			echo "Replaygain_${gainTypeText}_Gain=${gain} dB" >> "$destTagFile"
+			echo "Replaygain_${gainTypeText}_Peak=${peak}" >> "$destTagFile"
+			if [ "$gainType" = 'TRACK' ]; then
+				return $EX_OK
+			fi
+			printf -- "-m\x00overwrite`tagline -p`" | xargs -0 apetag -i "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		*.m4a)
+			if [ "$gainType" = 'TRACK' ]; then
+				gainTypeText='track'
+			else
+				gainTypeText='album'
+			fi
+			if [ -e "${TDIR}/${i}.isALAC" ]; then # .m4a is ALAC
+				neroAacTag "$destFile" "-meta-user:replaygain_${gainTypeText}_gain=${gain} dB" "-meta-user:replaygain_${gainTypeText}_peak=${peak}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $computeSoundcheck = true -a "$gainType" = "$soundcheckMode" ]; then
+					neroAacTag "$destFile" "-meta-user:itunnorm=$( getSoundcheck "$uGain" )" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+			else # .m4a is AAC
+				if [ $applyGain = true ]; then
+					if [ "$gainType" = "$applyGainType" ]; then
+						gainX="$( echo "scale=2; $uGain / 1.5" | bc )"
+						gainX="$( printf '%.0f' "$gainX" )"
+						aacgain -c -g "$gainX" "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+					fi
+				else
+					neroAacTag "$destFile" "-meta-user:replaygain_${gainTypeText}_gain=${gain} dB" "-meta-user:replaygain_${gainTypeText}_peak=${peak}" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+					if [ $computeSoundcheck = true -a "$gainType" = "$soundcheckMode" ]; then
+						neroAacTag "$destFile" "-meta-user:itunnorm=$( getSoundcheck "$uGain" )" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+					fi
+				fi
+			fi
+			;;
+
+		*.ogg)
+			if [ "$gainType" = 'TRACK' ]; then
+				return $EX_OK
+			fi
+			destTagFile="${TDIR}/${i}.vc.txt"
+			echo "REPLAYGAIN_${gainType}_PEAK=${peak}" >> "$destTagFile"
+			echo "REPLAYGAIN_${gainType}_GAIN=${gain} dB" >> "$destTagFile"
+			printf -- "-w`tagline -t`\x00%s" "$destFile" | xargs -0 vorbiscomment >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+			;;
+
+		*.mp3)
+			if [ $applyGain = true ]; then
+				if [ "$gainType" = "$applyGainType" ]; then
+					gainX="$( echo "scale=2; $uGain / 1.5" | bc )"
+					gainX="$( printf '%.0f' "$gainX" )"
+					mp3gain -c -g "$gainX" "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+			else
+				eyeD3 -2 --no-tagging-time-frame --set-user-text-frame="REPLAYGAIN_${gainType}_GAIN:${gain} dB" \
+					--set-user-text-frame="REPLAYGAIN_${gainType}_PEAK:${peak}" "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $computeSoundcheck = true -a "$gainType" = "$soundcheckMode" ]; then
+					eyeD3 -2 --no-tagging-time-frame --comment="eng:iTunNORM:$( getSoundcheck "$uGain" )" "$destFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				fi
+			fi
+			;;
+
+		*) ec=$EX_KO ;;
+	esac
+
+	return $ec
+}
+
+saveSeconds ()
+{
+	local samples sr seconds=1 duration hours minutes centiseconds ec=$EX_OK line milliseconds
+
+	case "$copyFile" in
+		*.flac)
+			samples="$( metaflac --show-total-samples "$copyFile" 2>> "$errorLogFile" )"
+			sr="$( metaflac --show-sample-rate "$copyFile" 2>> "$errorLogFile" )"
+			seconds=$(( (samples + (sr / 2)) / sr ))
+			;;
+
+		*.wv)
+			duration="$( wvunpack -s "$copyFile" 2>/dev/null | fgrep 'duration:' | cut -d ':' -f 2- | tr -d ' ' )"
+			if [ -n "$duration" ]; then
+				hours="${duration%%:*}" ; hours="${hours#0}"
+				minutes="${duration%:*}" ; minutes="${minutes#*:}" ; minutes="${minutes#0}"
+				seconds="${duration##*:}"
+				centiseconds="${seconds#*.}" ; centiseconds="${centiseconds#0}"
+				seconds="${seconds%.*}" ; seconds="${seconds#0}"
+				seconds=$(( (hours * 3600) + (minutes * 60) + seconds ))
+				if [ $centiseconds -ge 50 ]; then
+					((seconds++))
+				fi
+			fi
+			;;
+
+		*.ogg)
+			line="$( ogginfo "$copyFile" 2>> "$errorLogFile" | fgrep 'Playback length:' | tr -d ' ' | sed -e 's@\t@@g' | cut -d ':' -f 2-3 )"
+			if [ -n "$line" ]; then
+				minutes="${line%:*}" ; minutes="${minutes%m}"
+				seconds="${line#*:}" ; seconds="${seconds#s}"
+				milliseconds="${seconds#*.}"
+				seconds="${seconds%.*}" ; seconds="${seconds#0}"
+				if [ "${milliseconds:0:1}" -ge 5 ]; then
+					((seconds++))
+				fi
+				seconds=$(( (minutes * 60) + seconds ))
+			fi
+			;;
+
+		*)
+			duration="$( shninfo "$wavFile" 2>> "$errorLogFile" | fgrep 'Length:' | cut -d ':' -f 2- | tr -d ' ' )"
+			if [ -n "$duration" ]; then
+				duration="${duration##* }"
+				minutes="${duration%:*}" ; minutes="${minutes#0}"
+				seconds="${duration#*:}"
+				milliseconds="${seconds#*.}" ; milliseconds="${milliseconds#0}"
+				seconds="${seconds%.*}" ; seconds="${seconds#0}"
+				seconds=$(( (minutes * 60) + seconds ))
+				if [ "${milliseconds:2:1}" = '' ]; then # CD frames, i.e. <= 75
+					if [ $milliseconds -ge 38 ]; then
+						((seconds++))
+					fi
+				else # milliseconds
+					if [ $milliseconds -ge 500 ]; then
+						((seconds++))
+					fi
+				fi
+			fi
+			;;
+	esac
+
+	echo "$seconds" > "$secondsFile"
+	echo -n " + $seconds" >> "${TDIR}/durations"
+	return $ec
+}
+
+runWavegain ()
+{
+	local line
+
+	if which 'wavegain' >/dev/null 2>&1; then
+		line="$( wavegain -c -n "$wavFile" 2>&1 | fgrep "$wavFile" | tr -d ' ' | cut -d '|' -f 1-2 | tr -d '+' )" ; ec=$?
+		if [ $ec -ne $EX_OK ]; then return $EX_KO; fi
+		trackGain="${line%|*}" ; trackGain="${trackGain%dB}"
+		trackPeak="${line#*|}" ; trackPeak="$( echo "scale=8; $trackPeak / 32767" | bc )"
+		if [ "${trackPeak:0:1}" = '.' ]; then
+			trackPeak="0${trackPeak}"
+		fi
+		echo "$trackGain" > "$trackGainFile"
+		echo "$trackPeak" > "$trackPeakFile"
+		saveSeconds
+	else
+		return $EX_KO
+	fi
+}
+
+computeTrackGain ()
+{
+	local ec=$EX_OK line decimals sGain m4aFileType
+
+	if [ -e "$copyFile" ]; then
+		case "$copyFile" in
+			*.flac)
+				metaflac --add-replay-gain "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $ec -eq $EX_OK ]; then
+					trackGain="$( metaflac --export-tags-to=- "$copyFile" 2>> "$errorLogFile" | fgrep 'REPLAYGAIN_TRACK_GAIN=' | cut -d '=' -f 2 | cut -d ' ' -f 1 | tr -d '+' )"
+					trackPeak="$( metaflac --export-tags-to=- "$copyFile" 2>> "$errorLogFile" | fgrep 'REPLAYGAIN_TRACK_PEAK=' | cut -d '=' -f 2 )"
+					echo "$trackGain" > "$trackGainFile"
+					echo "$trackPeak" > "$trackPeakFile"
+					saveSeconds
+				fi
+				;;
+
+			*.wv)
+				wvgain -q -c "$copyFile" >/dev/null 2>> "$errorLogFile"
+				wvgain -q "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $ec -eq $EX_OK ]; then
+					apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@ / @g' -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' \
+						-e 's@replaygain_track_gain@Replaygain_Track_Gain@' -e 's@replaygain_track_peak@Replaygain_Track_Peak@' > "$sourceTagFile" &&
+					filterApetagOutput || ec=$EX_KO
+					if [ $ec -eq $EX_OK ]; then
+						destTagFile="${TDIR}/${i}.ape.txt"
+						convertTags 'ape' 'ape'
+						trackGain="$( fgrep 'Replaygain_Track_Gain=' "$destTagFile" | cut -d '=' -f 2 | cut -d ' ' -f 1 | tr -d '+' )"
+						trackPeak="$( fgrep 'Replaygain_Track_Peak=' "$destTagFile" | cut -d '=' -f 2 )"
+						echo "$trackGain" > "$trackGainFile"
+						echo "$trackPeak" > "$trackPeakFile"
+						saveSeconds
+					fi
+				fi
+				;;
+
+			*.ape)
+				mac "$copyFile" "$wavFile" -d >/dev/null 2>> "$errorLogFile" ; ec=$?
+				if [ $ec -eq $EX_OK ]; then
+					apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@, @g' | sed -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' | grep -i -v 'replaygain_' > "$sourceTagFile" &&
+					filterApetagOutput || ec=$EX_KO
+					if [ $ec -eq $EX_OK ]; then
+						destTagFile="${TDIR}/${i}.ape.txt"
+						convertTags 'ape' 'ape'
+						runWavegain || ec=$EX_KO
+					fi
+				fi
+				rm -f "$wavFile" >/dev/null 2>&1
+				;;
+
+			*.tak)
+				cd "$SWAPDIR"
+				WINEPREFIX="$takWinePrefix" $takWineExe takc -d -md5 ".\\${sourceFilename}" ".\\${i}.wav" >/dev/null 2>> "$errorLogFile"; ec=$?
+				cd "$OLDPWD"
+				if [ $ec -eq $EX_OK ]; then
+					apetag -i "$copyFile" 2>> "$errorLogFile" | sed -e 's@\x0@, @g' | sed -e 's@" "@=@' -e 's@^"@@' -e 's@"$@@' | grep -i -v 'replaygain_' > "$sourceTagFile" &&
+					filterApetagOutput || ec=$EX_KO
+					if [ $ec -eq $EX_OK ]; then
+						destTagFile="${TDIR}/${i}.ape.txt"
+						convertTags 'ape' 'ape'
+						runWavegain || ec=$EX_KO
+					fi
+				fi
+				rm -f "$wavFile" >/dev/null 2>&1
+				;;
+
+			*.m4a)
+				m4aFileType="$( alac -t "$f" 2>> "$errorLogFile" )"
+				if [ "$m4aFileType" = 'file type: alac' ]; then
+					touch "${TDIR}/${i}.isALAC"
+					alac -f "$wavFile" "$copyFile" >/dev/null 2>> "$errorLogFile" &&
+					runWavegain || ec=$EX_KO
+				else
+					line="$( aacgain -e -k -o -q "$copyFile" 2>> "$errorLogFile" | fgrep -v 'MP3 gain' | tr '\t' '|' | tr -d '+' | cut -d '|' -f 3-4 )" ; ec=$?
+					if [ $ec -eq $EX_OK ]; then
+						trackGain="${line%|*}"
+						decimals="${trackGain#*.}"
+						trackGain="${trackGain%.*}.${decimals:0:2}"
+						trackPeak="${line#*|}"; trackPeak="${trackPeak%.*}"
+						trackPeak="$( echo "scale=8; $trackPeak / 32767" | bc )"
+						if [ "${trackPeak:0:1}" = '.' ]; then
+							trackPeak="0${trackPeak}"
+						fi
+						echo "$trackGain" > "$trackGainFile"
+						echo "$trackPeak" > "$trackPeakFile"
+						neroAacDec '-if' "$copyFile" '-of' "$wavFile" >/dev/null 2>> "$errorLogFile" &&
+						saveSeconds || ec=$EX_KO
+					fi
+				fi
+				rm -f "$wavFile" >/dev/null 2>&1
+				;;
+
+			*.ogg)
+				vorbisgain -c "$copyFile" >/dev/null 2>> "$errorLogFile"
+				vorbisgain -q "$copyFile" >/dev/null 2>> "$errorLogFile" || ec=$EX_KO
+				if [ $ec -eq $EX_OK ]; then
+					vorbiscomment -l "$copyFile" 2>> "$errorLogFile" > "$sourceTagFile" || ec=$EX_KO
+					if [ $ec -eq $EX_OK ]; then
+						destTagFile="${TDIR}/${i}.vc.txt"
+						convertTags 'vc' 'vc'
+						trackGain="$( fgrep 'REPLAYGAIN_TRACK_GAIN=' "$destTagFile" | cut -d '=' -f 2 | cut -d ' ' -f 1 | tr -d '+' )"
+						trackPeak="$( fgrep 'REPLAYGAIN_TRACK_PEAK=' "$destTagFile" | cut -d '=' -f 2 )"
+						echo "$trackGain" > "$trackGainFile"
+						echo "$trackPeak" > "$trackPeakFile"
+						saveSeconds
+					fi
+				fi
+				;;
+
+			*.mp3)
+				line="$( mp3gain -e -k -o -q "$copyFile" 2>> "$errorLogFile" | fgrep -v 'MP3 gain' | tr '\t' '|' | tr -d '+' | cut -d '|' -f 3-4 )" ; ec=$?
+				if [ $ec -eq $EX_OK ]; then
+					trackGain="${line%|*}"
+					decimals="${trackGain#*.}"
+					trackGain="${trackGain%.*}.${decimals:0:2}"
+					trackPeak="${line#*|}"; trackPeak="${trackPeak%.*}"
+					trackPeak="$( echo "scale=8; $trackPeak / 32767" | bc )"
+					if [ "${trackPeak:0:1}" = '.' ]; then
+						trackPeak="0${trackPeak}"
+					fi
+					echo "$trackGain" > "$trackGainFile"
+					echo "$trackPeak" > "$trackPeakFile"
+					lame --silent --decode "$copyFile" "$wavFile" >/dev/null 2>> "$errorLogFile" &&
+					saveSeconds || ec=$EX_KO
+					rm -f "$wavFile" >/dev/null 2>&1
+				fi
+				;;
+
+			*) printf "${GR}%2u ${WG}WG ${CY}%s${NM}: unsupported format\n" $p "$sourceFilename" 1>&2; return $EX_KO ;;
+		esac
+	else
+		ec=$EX_KO
+	fi
+
+	if [ $ec -eq $EX_OK ]; then
+		saveGain 'TRACK' || ec=$EX_KO
+	fi
+
+	if [ $ec -eq $EX_OK ]; then
+		if [ $verbose = true ]; then
+			sGain="$trackGain"
+			if [ "${trackGain:0:1}" != '-' ]; then
+				sGain="+${sGain}"
+			fi
+			printf "${GR}%2u ${OK}OK ${NM}%9s ${CY}%s${NM}\n" $p "$sGain dB" "$sourceFilename"
+		fi
+	else
+		printf "${GR}%2u ${KO}ER ${CY}%s${NM}\n" $p "$sourceFilename" 1>&2
+	fi
+	return $ec
+}
+
+computeTrackGains ()
+{
+	local ec=$EX_OK
+
+	for ((i=0; i<${#sourceFiles[@]}; i++)); do
+		sourceFile="${sourceFiles[$i]}"
+		sourceFilename="${sourceFile##*/}"
+		copyFile="${SWAPDIR}/${sourceFilename}"
+		gainLockFile="${TDIR}/${i}"
+		sourceTagFile="${TDIR}/${i}.txt"
+		trackGainFile="${TDIR}/${i}.trackgain"
+		trackPeakFile="${TDIR}/${i}.trackpeak"
+		secondsFile="${TDIR}/${i}.seconds"
+		wavegainFile="${TDIR}/${i}.wavegain"
+		destFile="$sourceFile"
+		wavFile="${SWAPDIR}/${i}.wav"
+
+		if unlink "$gainLockFile" 2>/dev/null; then
+			prepareSource &&
+			computeTrackGain || ec=$EX_KO
+			rm -f "$copyFile" "${copyFile}c" >/dev/null 2>&1
+		fi
+	done
+
+	rm -f "${instanceDir}/process.${p}"
+	return $ec
+}
+
+computeAlbumGain ()
+{
+	local ec=$EX_OK tg seconds=1 N=0 rank
+
+	for ((i=0; i<${#sourceFiles[@]}; i++)); do
+		if [ ! -f "${TDIR}/${i}.trackgain" ]; then
+			return $EX_KO
+		fi
+		tg="$( cat "${TDIR}/${i}.trackgain" )"
+		if [ -e "${TDIR}/${i}.seconds" ]; then
+			seconds="$( cat "${TDIR}/${i}.seconds" )"
+			if [ -z "$seconds" ]; then
+				seconds=1
+			fi
+		fi
+		for (( s=0; s<seconds; s++ )); do
+			echo "$tg" >> "${TDIR}/trackgains"
+			((N++))
+		done
+		cat "${TDIR}/${i}.trackpeak" >> "${TDIR}/trackpeaks"
+	done
+
+	albumPeak="$( sort -n "${TDIR}/trackpeaks" | tail -n 1 )"
+
+	sort -n "${TDIR}/trackgains" > "${TDIR}/trackgains.tmp"
+	mv "${TDIR}/trackgains.tmp" "${TDIR}/trackgains"
+
+	rank="$( echo "scale=2; (${replaygain_percentile}/100) * $N + (1 / 2)" | bc )"
+	rank="$( printf "%.0f" "$rank" )"
+	albumGain="$( head -n $rank "${TDIR}/trackgains" | tail -n 1 )"
+
+	for ((i=0; i<${#sourceFiles[@]}; i++)); do
+		sourceTagFile="${TDIR}/${i}.txt"
+		destFile="${sourceFiles[$i]}"
+		saveGain 'ALBUM' || ec=$EX_KO
+	done
+	
+	if [ $verbose = true ]; then
+		gain="$albumGain"
+		if [ "${gain:0:1}" != '-' ]; then
+			gain="+${gain}"
+		fi
+		echo "Album gain: $gain dB"
+	fi
+
+	return $ec
+}
+
+diffStr ()
+{
+	local a="$1" b="$2" u="$3" diff
+	if test "$u" = '%'; then u='%%'; fi
+	diff="$( echo "scale=3; $a - $b" | bc )"
+	if test "${diff:0:1}" = '-'; then
+		diff="+$( printf "%.1f${u}" "${diff:1}" )"
+	else
+		diff="-$( printf "%.1f${u}" $diff )"
+	fi
+	echo -n "$diff"
+}
+
+getOutputCodecProps ()
+{
+		case "$outputCodec" in
+			WAV)                 destExtension='wav'        cname='WAV' ;;
+			FLAC)                destExtension='flac'       cname='FLAC' ;;
+			Flake)               destExtension='flac'       cname='Flake' ;;
+			WavPack)             destExtension='wv'         cname='WavPack' ;;
+			WavPackHybrid)       destExtension='wv'         cname='WavPack Hybrid' ;;
+			WavPackLossy)        destExtension='wv'         cname='WavPack Lossy' ;;
+			MonkeysAudio)        destExtension='ape'        cname="Monkey's Audio" ;;
+			TAK)                 destExtension='tak'        cname="TAK" ;;
+			ALAC)                destExtension='m4a'        cname='ALAC' ;;
+			lossyWAV)            destExtension='lossy.wav'  cname='lossyWAV' ;;
+			lossyFLAC)           destExtension='lossy.flac' cname='lossyFLAC' ;;
+			lossyWV)             destExtension='lossy.wv'   cname='lossyWV' ;;
+			lossyTAK)            destExtension='lossy.tak'  cname='lossyTAK' ;;
+			OggVorbis|WinVorbis) destExtension='ogg'        cname='Ogg Vorbis' ;;
+			LAME|WinLAME)        destExtension='mp3'        cname='LAME' ;;
+			AAC|WinAAC)          destExtension='m4a'        cname='AAC' ;;
+			Musepack)            destExtension='mpc'        cname='Musepack' ;;
+			Opus)                destExtension='opus'       cname='Opus' ;;
+		esac
+}
+
+getDestFile ()
+{
+	sourceFilename="${sourceFile##*/}"
+	sourceBasename="${sourceFilename%.*}"
+	if [ "$outputCodec" = 'WAV' -a "$sourceBasename" != "${sourceBasename%.lossy}" ]; then
+		destExtension='lossy.wav'
+	fi
+	sourceBasename="${sourceBasename%.lossy}";
+	sourceExtension="${sourceFilename##*.}"
+	destFile="${destDir}/${sourceBasename}.${destExtension}"
+}
+
+printStats ()
+{
+	local f c destExtension dest bcmd seconds slist bytes_wav bytes_compressed imbsec ombsec mib_compressed ratio cname duration='0' rate='' readDuration
+
+	seconds="$( printf 'scale=6; %.6f - %.6f\n' "$time2" "$time1" | bc )"
+	if [ -f "${TDIR}/durations" ]; then
+		duration="$( { echo -n 'scale=2; ' ; cat "${TDIR}/durations" ; echo ; } | bc )"
+		if [ "$duration" != '0' ]; then
+			duration="$( printf "%.0f" "$duration" )"
+			rate="$( echo "scale=1; $duration / $seconds" | bc )"
+		fi
+	fi
+	printf '%.2f seconds' $seconds
+
+	readDuration="$( { echo -n 'scale=6; ' ; cat "${TDIR}/readTimes" ; echo ; } | bc )"
+	if [ "$readDuration" = '0' ]; then
+		readDuration="$seconds"
+	fi
+
+	for f in "${sourceFiles[@]}"; do
+		slist="${slist}\x00${f//%/%%}"
+		if [ -e "${f}c" ]; then # WavPack correction file
+			slist="${slist}\x00${f//%/%%}c"
+		fi
+	done
+	if [ "$OS" = 'Linux' ]; then
+		bytes_source="$( { echo -n 'scale=0; 0'; printf "%s${slist}" ' + %s' | xargs -0 stat -L --printf; echo; } | bc )"
+	else
+		bytes_source="$( { echo -n 'scale=0; 0'; printf "%s${slist}" ' + %z' | xargs -0 stat -L -n -f; echo; } | bc )"
+	fi
+	imbsec="$( echo "scale=3; $bytes_source / ($readDuration * 1000000)" | bc )"
+
+	if [ -z "$outputCodecs" ]; then
+		if [ -z "$rate" ]; then
+			printf ' (read: %.1f MB/s)\n' "$imbsec"
+		else
+			printf ' (read: %.1f MB/s, rate: %sx)\n' "$imbsec" "$rate"
+		fi
+		return
+	fi
+
+	bcmd=''
+	for outputCodec in $outputCodecs; do
+		getOutputCodecProps
+		for sourceFile in "${sourceFiles[@]}"; do
+			getDestFile
+			if [ -e "$destFile" ]; then
+				bcmd="${bcmd}\x00${destFile//%/%%}"
+				if [ -e "${destFile}c" ]; then # WavPack correction file
+					bcmd="${bcmd}\x00${destFile//%/%%}c"
+				fi
+			fi
+		done
+	done
+
+	if [ "$OS" = 'Linux' ]; then
+		bytes_compressed="$( { echo -n 'scale=0; 0'; printf "%s${bcmd}" ' + %s' | xargs -0 stat -L --printf; echo; } | bc )"
+	else
+		bytes_compressed="$( { echo -n 'scale=0; 0'; printf "%s${bcmd}" ' + %z' | xargs -0 stat -L -n -f; echo; } | bc )"
+	fi
+	ombsec="$( echo "scale=3; $bytes_compressed / ($seconds * 1000000)" | bc )"
+
+	if [ -n "$rate" ]; then
+		printf ' (read: %.1f MB/s, write: %.1f MB/s, rate: %sx)\n' "$imbsec" "$ombsec" "$rate"
+	else
+		printf ' (read: %.1f MB/s, write: %.1f MB/s)\n' "$imbsec" "$ombsec"
+	fi
+
+	if [ "$outputCodecs" = 'WAV' ]; then return; fi
+
+	bytes_wav="$( { echo -n 'scale=0; 0' ; cat "${TDIR}/bytes" ; echo ; } | bc )"
+	mib_source="$( echo "scale=3; $bytes_source / 1048576" | bc )"
+	mib_uncompressed="$( echo "scale=3; $bytes_wav / 1048576" | bc )"
+	mib_diff="$( diffStr $mib_uncompressed $mib_source ' MiB' )"
+	ratio="$( echo "scale=3; $bytes_source * 100 / $bytes_wav" | bc )"
+	ratio_diff="$( diffStr 100 $ratio '%' )"
+
+	if [ $duration -gt 0 ]; then
+		bitrate_source="$( echo "scale=0; (${bytes_source} * 8) / ${duration} / 1000" | bc )"
+	else
+		bitrate_source='?'
+	fi
+
+	printf '\n%-15s    %6.1f MiB                 %6.1f%%\n%-15s    %6.1f MiB (%11s)    %5.1f%% (%7s) %7s kbps\n' \
+		'WAV:' "$mib_uncompressed" '100' 'Source:' "$mib_source" "$mib_diff" "$ratio" "$ratio_diff" "$bitrate_source"
+
+	for outputCodec in $outputCodecs; do
+		getOutputCodecProps
+		bcmd=''
+		for sourceFile in "${sourceFiles[@]}"; do
+			getDestFile
+			if [ -e "$destFile" ]; then
+				bcmd="${bcmd}\x00${destFile//%/%%}"
+				if [ -e "${destFile}c" ]; then # WavPack correction file
+					bcmd="${bcmd}\x00${destFile//%/%%}c"
+				fi
+			fi
+		done
+
+		if [ "$OS" = 'Linux' ]; then
+			bytes_compressed="$( { echo -n 'scale=0; 0'; printf "%s${bcmd}" ' + %s' | xargs -0 stat -L --printf; echo; } | bc )"
+		else
+			bytes_compressed="$( { echo -n 'scale=0; 0'; printf "%s${bcmd}" ' + %z' | xargs -0 stat -L -n -f; echo; } | bc )"
+		fi
+
+		if [ $duration -gt 0 ]; then
+			bitrate_compressed="$( echo "scale=0; (${bytes_compressed} * 8) / ${duration} / 1000" | bc )"
+		else
+			bitrate_compressed='?'
+		fi
+
+		mib_compressed="$( echo "scale=3; $bytes_compressed / 1048576" | bc )"
+		mib_to_source_diff="$( diffStr $mib_source $mib_compressed ' MiB' )"
+		ratio="$( echo "scale=3; $bytes_compressed * 100 / $bytes_wav" | bc )"
+		compressed_to_source_ratio="$( echo "scale=3; $bytes_compressed * 100 / $bytes_source" | bc )"
+		ratio_to_source_diff="$( diffStr 100 $compressed_to_source_ratio '%' )"
+
+		printf '%-15s    %6.1f MiB (%11s)    %5.1f%% (%7s) %7s kbps\n' \
+			"${cname}:"	$mib_compressed "$mib_to_source_diff" "$ratio" "$ratio_to_source_diff" "$bitrate_compressed"
+	done
+
+	return $EX_OK
+}
+
+# main() =======================================================================
+
+if [ -n "$LC_ALL" ]; then
+	export LANG="$LC_ALL"
+	unset LC_ALL
+fi
+export LC_NUMERIC=C
+
+checkBinaries
+
+OS="$( uname -s )"
+
+nProcesses=2 maxProcesses=16
+if [ -e '/proc/cpuinfo' ]; then
+	maxProcesses="$( fgrep 'cpu MHz' /proc/cpuinfo | wc -l )"
+	nProcesses=$maxProcesses
+	if [ $maxProcesses -eq 0 ]; then
+		nProcesses=2 maxProcesses=16
+	fi
+	((maxProcesses++))
+elif [ "$OS" = 'Darwin' ]; then # Mac OS X
+	maxProcesses="$( system_profiler -detailLevel full SPHardwareDataType | fgrep 'Total Number of Cores:' | cut -d ':' -f 2 | tr -d ' ' )"
+	nProcesses=$maxProcesses
+	if [ -z "$maxProcesses" ]; then
+		nProcesses=2 maxProcesses=16
+	fi
+	((maxProcesses++))
+fi
+
+destDir="$PWD" outputCodecs='' lastCodec='' nCodecs=0 copyWAV=false verbose=true checkFiles=false
+hashes='' doCRC=false doMD5=false doSHA1=false nLossyWAV=0 copyLossyWAV=false
+bitDepth='' samplingRate='' preserveMetadata='' computeReplaygain=false applyGain=false applyGainType='' computeSoundcheck=true
+
+if [ "$calledAs" = 'decaude' ]; then
+	lastCodec='WAV'
+	outputCodecs="$outputCodecs $lastCodec"
+	((nCodecs++))
+	copyWAV=true
+fi
+
+while getopts 'sn:o:O:tdc:C:H:q:b:r:gG:S:hV' o ; do
+	case $o in
+		s) verbose=false ;;
+
+		n)
+			case "$OPTARG" in
+				[0-9]|[0-9][0-9])
+					if [ $OPTARG -le $maxProcesses ]; then
+						nProcesses=$OPTARG
+					else
+						echo "$me -n: the number of processes must be an integer between 1 and $maxProcesses" 1>&2; exit $EX_USAGE
+					fi
+					;;
+
+				*) echo "$me -n: the number of processes must be an integer between 1 and $maxProcesses" 1>&2; exit $EX_USAGE ;;
+			esac
+			;;
+
+		o)
+			destDir="$OPTARG"
+			if [ "${destDir%/}" != "$destDir" ]; then
+				destDir="${destDir%/}"
+			fi
+			if [ ! -e "$destDir" ]; then
+				echo "$me -o \"$destDir\": directory doesn't exist. Either create it manually, or try again with -O." 1>&2; exit $EX_CANTCREAT
+			elif [ ! -d "$destDir" ]; then
+				echo "$me -o \"$destDir\": not a directory." 1>&2; exit $EX_CANTCREAT
+			elif [ ! -w "$destDir" ]; then
+				echo "$me -o \"$destDir\": directory is not writable." 1>&2; exit $EX_CANTCREAT
+			fi
+			;;
+
+		O)
+			destDir="$OPTARG"
+			if [ "${destDir%/}" != "$destDir" ]; then
+				destDir="${destDir%/}"
+			fi
+			if [ ! -e "$destDir" ]; then
+				if ! mkdir -p "$destDir" >/dev/null 2>&1 ; then
+					echo "$me -O \"$destDir\": failed to create directory." 1>&2; exit $EX_CANTCREAT
+				fi
+			elif [ ! -d "$destDir" ]; then
+				echo "$me -O \"$destDir\": not a directory." 1>&2; exit $EX_CANTCREAT
+			elif [ ! -w "$destDir" ]; then
+				echo "$me -O \"$destDir\": directory is not writable." 1>&2; exit $EX_CANTCREAT
+			fi
+			;;
+
+		t) checkFiles=true ;;
+
+		c|C)
+			case "$OPTARG" in
+				wav)        lastCodec='WAV' copyWAV=true ;;
+				flac)       lastCodec='FLAC' ;;
+				flake)      lastCodec='Flake' ;;
+				wv)         lastCodec='WavPack' ;;
+				wvh)        lastCodec='WavPackHybrid' ;;
+				wvl)        lastCodec='WavPackLossy' ;;
+				ape)        lastCodec='MonkeysAudio' ;;
+				tak)        lastCodec='TAK' ;;
+				alac)       lastCodec='ALAC' ;;
+				lossyWAV)   lastCodec='lossyWAV'; ((nLossyWAV++)) ; copyLossyWAV=true ;;
+				lossyFLAC)  lastCodec='lossyFLAC'; ((nLossyWAV++)) ;;
+				lossyWV)    lastCodec='lossyWV'; ((nLossyWAV++)) ;;
+				lossyTAK)   lastCodec='lossyTAK'; ((nLossyWAV++)) ;;
+				mp3|lame)   lastCodec='LAME' ;;
+				winlame)    lastCodec='WinLAME' ;;
+				m4a|aac)    lastCodec='AAC' ;;
+				winaac)     lastCodec='WinAAC' ;;
+				ogg|vorbis) lastCodec='OggVorbis' ;;
+				winvorbis)  lastCodec='WinVorbis' ;;
+				mpc|musepack) lastCodec='Musepack' ;;
+				opus)       lastCodec='Opus' ;;
+				*) echo "$me -c: invalid codec (try $me -h)" 1>&2; exit $EX_USAGE ;;
+			esac
+			outputCodecs="$outputCodecs $lastCodec"; ((nCodecs++))
+			if [ "$o" = 'c' ]; then
+				preserveMetadata="${preserveMetadata}x${lastCodec}Y"
+			fi
+			;;
+
+		d) lastCodec='WAV'; outputCodecs="$outputCodecs $lastCodec"; ((nCodecs++)); copyWAV=true ;;
+
+		H)
+			case "$OPTARG" in
+				crc|CRC)   hashes="${hashes}CRC "  doCRC=true  ;;
+				md5|MD5)   hashes="${hashes}MD5 "  doMD5=true  ;;
+				sha1|SHA1) hashes="${hashes}SHA1 " doSHA1=true ;;
+				*) echo "$me -H: hash algorithm must be one of crc, md5 or sha1" 1>&2; exit $EX_USAGE ;;
+			esac
+			;;
+
+		q)
+			if [ -z "$lastCodec" ]; then
+				echo "$me -q: you must specify a codec first (-c)" 1>&2; exit $EX_USAGE
+			fi
+
+			case "$lastCodec" in
+				FLAC)
+					case "$OPTARG" in
+						[0-8]) compression_FLAC=$OPTARG ;;
+						fast) compression_FLAC=0 ;;
+						best) compression_FLAC=8 ;;
+						*) echo "$me -c flac -q: compression level must be an integer between 0 and 8, or one of fast or best" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				Flake)
+					case "$OPTARG" in
+						[0-9]|1[0-2]) compression_Flake=$OPTARG ;;
+						*) echo "$me -c flake -q: compression level must be an integer between 0 and 12." 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				WavPack|WavPackHybrid|WavPackLossy)
+					case "$OPTARG" in
+						d|default) compression_WavPack='' ;;
+						x|x[1-6]) compression_WavPack=$OPTARG ;;
+						f|fx|fx[1-6]) compression_WavPack=$OPTARG ;;
+						h|hx|hx[1-6]) compression_WavPack=$OPTARG ;;
+						hh|hhx|hhx[1-6]) compression_WavPack=$OPTARG ;;
+						*) echo "$me -c wv -q: compression level must be a combination of [f|h|hh][x[1-6]], or d[efault]" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				MonkeysAudio)
+					case "$OPTARG" in
+						[1-5]) compression_MonkeysAudio=$OPTARG ;;
+						fast) compression_MonkeysAudio=1 ;;
+						normal) compression_MonkeysAudio=2 ;;
+						high) compression_MonkeysAudio=3 ;;
+						extra*) compression_MonkeysAudio=4 ;;
+						insane) compression_MonkeysAudio=5 ;;
+						*) echo "$me -c ape -q: compression level must be a number between 1 and 5, or one of fast, normal, high, extra, insane" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				TAK)
+					case "$OPTARG" in
+						[0-4]|[0-4]e|[0-4]m) compression_TAK=$OPTARG ;;
+						*) echo "$me -c tak -q: compression level must be an integer between 0 and 4, optionally followed by 'e' (extra) or 'm' (max)" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				lossyWAV|lossyFLAC|lossyWV|lossyTAK)
+					case "$OPTARG" in
+						X|P|C|S|H|E|I) compression_lossyWAV="$OPTARG" ;;
+						extraportable) compression_lossyWAV='X' ;;
+						portable) compression_lossyWAV='P' ;;
+						economic) compression_lossyWAV='C' ;;
+						standard) compression_lossyWAV='S' ;;
+						high) compression_lossyWAV='H' ;;
+						extreme) compression_lossyWAV='E' ;;
+						insane) compression_lossyWAV='I' ;;
+						*) echo "$me -c lossy[WAV|FLAC|WV|TAK] -q: compression level must be one of X, P, C, S, H, E, I, or one of extraportable, portable, economic, standard, high, extreme or insane" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				LAME|WinLAME)
+					case "$OPTARG" in
+						[0-9]) compression_LAME=$OPTARG ;;
+						medium) compression_LAME=4 ;;
+						standard) compression_LAME=2 ;;
+						extreme) compression_LAME=0 ;;
+						insane|320) bitrate_LAME=320 LAME_MODE='CBR' ;;
+						*) echo "$me -c [mp3|lame|winlame] -q: compression level must be an integer between 0 and 9 or one of medium, standard, extreme, insane or 320." 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				AAC|WinAAC)
+					case "$OPTARG" in
+						0|1|0.[1-9]|0.[0-9][0-9]|1.0) compression_AAC=$OPTARG ;;
+						*) echo "$me -c [aac|winaac] -q: compression level must be a float between 0 and 1" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				OggVorbis|WinVorbis)
+					case "$OPTARG" in
+						[0-9]|10) compression_OggVorbis=$OPTARG ;;
+						*) echo "$me -c [ogg|vorbis|winvorbis] -q: compression level must be an integer between 0 and 10" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				Musepack)
+					case "$OPTARG" in
+						[0-9]|10) compression_Musepack=$OPTARG ;;
+						telephone) compression_Musepack=2 ;;
+						thumb) compression_Musepack=3 ;;
+						radio) compression_Musepack=4 ;;
+						standard|normal) compression_Musepack=5 ;;
+						extreme|xtreme) compression_Musepack=6 ;;
+						insane) compression_Musepack=7 ;;
+						braindead) compression_Musepack=8 ;;
+						*) echo "$me -c mpc -q: compression level must be an integer between 0 and 10, or one of telephone, thumb, radio, standard, normal, extreme, xtreme, insane or braindead" 1>&2; exit $EX_USAGE ;;
+					esac ;;
+
+				*) echo "$me -q: there is no compression level switch for the selected codec" 1>&2; exit $EX_USAGE ;;
+			esac ;;
+
+		b)
+			if [ "$lastCodec" = 'WavPackHybrid' -o "$lastCodec" = 'WavPackLossy' ]; then
+				case "$OPTARG" in
+					[2-9]|[2-9].[0-9]|1[0-9]|1[0-9].[0-9]|2[0-3]|2[0-3].[0-9]) bitrate_WavPackLossy=$OPTARG ;;
+					[2-9][0-9]|[1-9][0-9][0-9]|[1-9][0-9][0-9][0-9]) bitrate_WavPackLossy=$OPTARG ;;
+					*) echo "$me -b: bitrate must be a float between 2.0 and 23.9 in bits per sample, or an integer between 24 and 9600 in kilobits per sample" 1>&2; exit $EX_USAGE
+				esac
+				if [ "${bitrate_WavPackLossy%.*}" -lt 2 -o "${bitrate_WavPackLossy%.*}" -gt 9600 ]; then
+					echo "$me -b: bitrate must be a float between 2.0 and 23.9 in bits per sample, or an integer between 24 and 9600 in kilobits per sample" 1>&2; exit $EX_USAGE
+				fi
+			elif [ "$lastCodec" = 'Opus' ]; then
+				case "$OPTARG" in
+					[6-9]|[1-9][0-9]|[1-3][0-9][0-9]) bitrate_Opus=$OPTARG ;;
+					*) echo "$me -b: bitrate must be an integer between 6 and 320 in kilobits per second" 1>&2; exit $EX_USAGE
+				esac
+				if [ $bitrate_Opus -lt 6 -o $bitrate_Opus -gt 320 ]; then
+					echo "$me -b: bitrate must be an integer between 6 and 320 in kilobits per second" 1>&2; exit $EX_USAGE
+				fi
+			elif [ "$lastCodec" = 'LAME' -o "$lastCodec" = 'WinLAME' ]; then
+				case "$OPTARG" in
+					1[6-9]|[2-9][0-9]|[1-2][0-9][0-9]|3[0-1][0-9]|320) bitrate_LAME="$OPTARG" ;;
+					*) echo "$me -b: bitrate must be an integer between 16 and 320 in kilobits per second" 1>&2; exit $EX_USAGE
+				esac
+				LAME_MODE='CBR'
+			else
+				case "$OPTARG" in
+					16|24) bitDepth=$OPTARG ;;
+					*) echo "$me -b: bit depth must be either 16 or 24" 1>&2; exit $EX_USAGE
+				esac
+			fi
+			;;
+
+		r)
+			case "$OPTARG" in
+				44100|48000|88200|96000|176400|192000) samplingRate=$OPTARG ;;
+				cd|CD) bitDepth=16 samplingRate=44100 ;;
+				dvd|DVD) bitDepth=16 samplingRate=48000 ;;
+				*) echo "$me -r: sampling rate must be one of 44100, 48000, 88200, 96000, 176400, 192000, cd or dvd" 1>&2; exit $EX_USAGE
+			esac
+			;;
+
+		g) computeReplaygain=true ;;
+
+		G)
+			computeReplaygain=true applyGain=true
+			case "$OPTARG" in
+				album) applyGainType='ALBUM' ;;
+				track) applyGainType='TRACK' ;;
+				*) echo "$me -G: gain type must be either album or track" 1>&2; exit $EX_USAGE
+			esac
+			;;
+
+		S)
+			computeReplaygain=true computeSoundcheck=true
+			case "$OPTARG" in
+				album) soundcheckMode="ALBUM" ;;
+				track) soundcheckMode="TRACK" ;;
+				*) echo "$me -S: gain type must be either album or track" 1>&2; exit $EX_USAGE
+			esac
+			;;
+
+		h) printUsage; exit $EX_OK ;;
+
+		V) echo "$me $VERSION"; exit $EX_OK ;;
+
+		*) echo "Try '$me -h' for more information." 1>&2; exit $EX_USAGE ;;
+	esac
+done
+
+shift $(( OPTIND - 1 ))
+if [ $# -lt 1 ]; then
+	printUsage 1>&2
+	exit $EX_USAGE
+fi
+
+if [ -z "$outputCodecs" -a $checkFiles = false -a $computeReplaygain = false ]; then
+	echo "$me: error: no action specified" 1>&2
+	exit $EX_USAGE
+elif [ -n "$outputCodecs" -a $checkFiles = true ]; then
+	echo "$me: error: -c/-d and -t are mutually exclusive. Try again with either one alone." 1>&2
+	exit $EX_USAGE
+elif [ -n "$outputCodecs" -a $computeReplaygain = true ]; then
+	echo "$me: error: -c/-d and -g are mutually exclusive. Try again with either one alone." 1>&2
+	exit $EX_USAGE
+elif [ $checkFiles = true -a $computeReplaygain = true ]; then
+	echo "$me: error: -g and -t are mutually exclusive. Try again with either one alone." 1>&2
+	exit $EX_USAGE
+fi
+
+export LANG='en_US.UTF-8'
+outputCodecs="${outputCodecs# }" nTracks=$# ec=$EX_OK
+declare -a sourceFiles=("$@")
+
+checkInputFiles && checkBinaries && handleInstance && setupSwapdir
+#startTimer && checkInputFiles && stopTimer 'checkInputFiles()' &&
+#startTimer && checkBinaries && stopTimer 'checkBinaries()' &&
+#startTimer && handleInstance && stopTimer 'handleInstance()' &&
+#startTimer && setupSwapdir && stopTimer 'setupSwapdir()'
+trap "cleanAbort" INT; trap "exit" TERM
+
+if [ $nCodecs -gt 0 ]; then # action: transcode files
+	nJobs=$(( nTracks * nCodecs ))
+	if [ $nProcesses -gt $nJobs ]; then setNProcesses $nJobs ; fi
+	oProcesses=$nProcesses
+	checkFreeSpace 'transcoding'
+	if [ "$OS" = 'Linux' ]; then
+		time1="$( date '+%s.%N' )"
+	else
+		time1="$( date '+%s' ).0"
+	fi
+	for ((p=0; p<nProcesses; p++)); do
+		transcode &
+	done
+elif [ $checkFiles = true ]; then
+	if [ $nProcesses -gt $nTracks ]; then setNProcesses $nTracks ; fi
+	oProcesses=$nProcesses
+	checkFreeSpace 'testing'
+	if [ "$OS" = 'Linux' ]; then
+		time1="$( date '+%s.%N' )"
+	else
+		time1="$( date '+%s' ).0"
+	fi
+	for ((p=0; p<=nProcesses; p++)); do
+		testFiles &
+	done
+elif [ $computeReplaygain = true ]; then
+	if [ $nProcesses -gt $nTracks ]; then setNProcesses $nTracks ; fi
+	oProcesses=$nProcesses
+	checkFreeSpace 'replaygain'
+	if [ "$OS" = 'Linux' ]; then
+		time1="$( date '+%s.%N' )"
+	else
+		time1="$( date '+%s' ).0"
+	fi
+	for ((p=0; p<=nProcesses; p++)); do
+		computeTrackGains &
+	done
+fi
+ec=$EX_OK ; for p in $( jobs -p ); do wait $p || ec=$EX_KO ; done
+
+if [ $computeReplaygain = true -a $ec -eq $EX_OK ]; then
+	computeAlbumGain || ec=$EX_KO
+fi
+
+if [ "$OS" = 'Linux' ]; then
+	time2="$( date '+%s.%N' )"
+else
+	time2="$( date '+%s' ).0"
+fi
+
+# print transcoding stats if applicable
+if [ $verbose = true -a $ec -eq $EX_OK ]; then
+	printStats
+fi
+cleanExit $ec
