@@ -10,7 +10,7 @@ if len(sys.argv) < 2:
 
 message = ' '.join(sys.argv[1:])
 
-cmd = 'svn commit -m "%s"' % (path, message)
+cmd = 'svn commit -m "%s"' % (message)
 
 print cmd
 
