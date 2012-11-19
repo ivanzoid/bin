@@ -1,0 +1,23 @@
+#!/bin/sh
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+if ! program_exists ffmpeg; then
+	echo "Please install ffmpeg"
+	exit 1
+fi
+
+if ! program_exists metaflac; then
+	echo "Please install flac"
+	exit 1
+fi
+
+IN=$1
+OUT=${in/.flac/.m4a}
+ALBUM_ARTIST=$(metaflac --show-tag='ALBUM ARTIST' "$in" | sed 's/ALBUM ARTIST=//g')
+
+echo "Converting $IN to $OUT ..."
+ffmpeg -y -i "$IN" -acodec alac -metadata album_artist="$ALBUM_ARTIST" "$OUT"
+

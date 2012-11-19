@@ -1,0 +1,15 @@
+#!/bin/sh
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+if ! program_exists ffmpeg; then
+	echo "Please install ffmpeg"
+	exit 1
+fi
+
+OUT=$(basename "$1")
+OUT="${OUT/%m4a/mp3}"
+
+ffmpeg -i "$1" -acodec libmp3lame -ab 320k "$OUT"
