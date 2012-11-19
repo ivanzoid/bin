@@ -1,0 +1,31 @@
+#!/bin/sh
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+CONVERT=''
+
+if program_exists gm; then
+	CONVERT='gm convert'
+fi
+
+if [ -z $CONVERT ] && program_exists convert; then
+	CONVERT='convert'
+fi
+
+if [ -z $CONVERT ]; then
+	echo "Please install GraphicsMagick or ImageMagick"
+	exit 1
+fi
+
+for f in $@; do
+	if [[ $f == *@2x* ]]; then
+		fout=${f/@2x/}
+		echo "Converting $f to $fout ..."
+		$CONVERT -resize 50%x50% "$f" "$fout"
+	fi
+done
+
+
+
