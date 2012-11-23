@@ -10,11 +10,11 @@ if program_exists gm; then
 	CONVERT='gm convert'
 fi
 
-if [ -z $CONVERT ] && program_exists convert; then
+if [ -z "$CONVERT" ] && program_exists convert; then
 	CONVERT='convert'
 fi
 
-if [ -z $CONVERT ]; then
+if [ -z "$CONVERT" ]; then
 	echo "Please install GraphicsMagick or ImageMagick"
 	exit 1
 fi
