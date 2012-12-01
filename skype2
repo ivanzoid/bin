@@ -1,4 +1,0 @@
-#!/bin/sh
-
-rm -f "$HOME/Library/Application Support/Skype/Skype.pid"
-open -na Skype
