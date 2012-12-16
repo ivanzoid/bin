@@ -1,0 +1,3 @@
+#!/bin/sh
+
+curl -u ivanzoid https://api.github.com/user/repos -d "{\"name\":\"$1\"}"
