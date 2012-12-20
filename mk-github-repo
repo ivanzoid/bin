@@ -1,0 +1,5 @@
+#!/bin/sh
+
+USER='ivanzoid'
+PASS=`cat $HOME/private/.githubpass`
+curl -u "$USER:$PASS" https://api.github.com/user/repos -d "{\"name\":\"$1\"}"
