@@ -1,0 +1,9 @@
+#!/bin/sh
+
+filename="$1"
+ext=${filename##*.}
+
+exif_date=$(exiftool -p '$DateTimeOriginal' "$filename")
+exif_name=$(echo "$exif_date" | sed -e 's/:/_/g' -e 's/ /_/g')
+
+smart-mv "$filename" "$exif_name.$ext"
