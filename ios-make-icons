@@ -1,0 +1,39 @@
+#!/bin/sh
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+#!/bin/sh
+
+main()
+{
+	set -e
+
+	CONVERT=''
+
+	if program_exists gm; then
+		CONVERT='gm convert'
+	fi
+
+	if [ -z "$CONVERT" ] && program_exists convert; then
+		CONVERT='convert'
+	fi
+
+	if [ -z "$CONVERT" ]; then
+		echo "Please install GraphicsMagick or ImageMagick"
+		exit 1
+	fi
+
+	if [ $# -lt 1 ]; then
+		echo "Please specify image name"
+	fi
+
+	IN="$1"
+	#NAME=${IN:/
+
+	#echo "Converting $f to $fout ..."
+}
+
+main "$@"
+

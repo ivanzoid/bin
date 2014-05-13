@@ -2,7 +2,7 @@
 
 #
 # Wrapper around 'mv' - if destination file already exists, appends number to filename.
-# For example, 'smart-mv foo.bar foo.txt': if foo.txt already exists, will perform 'mv foo.bar foo2.txt'
+# For example, 'smart-mv foo.bar foo.txt': if foo.txt already exists, will perform 'mv foo.bar foo.2.txt'
 #
 
 src="$1"
@@ -14,9 +14,9 @@ if [[ ! -e "$dest" ]]; then
     mv "$src" "$dest"
 else
     num=2
-    while [[ -e "$basename$num.$ext" ]]; do
+    while [[ -e "$basename.$num.$ext" ]]; do
         (( num++ ))
     done
-    mv "$src" "$basename$num.$ext" 
+    mv "$src" "$basename.$num.$ext" 
 fi 
 

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+TMPFILE="$(mktemp -t `basename $0`)"
+HEX="$1"
+
+echo "$HEX" | xxd -r -p > "$TMPFILE"
+shift
+curl --data-binary "@$TMPFILE" "$@"
+rm -f "$TMPFILE"

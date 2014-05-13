@@ -1,0 +1,7 @@
+#!/bin/sh
+
+PIC=$1
+
+DATE=$(exiftool -p '$DateTimeOriginal' $PIC | sed 's/[: ]//g')
+DATE_FOR_TOUCH=$(echo $DATE | sed 's/\(..$\)/\.\1/')
+touch -t $DATE_FOR_TOUCH $PIC
