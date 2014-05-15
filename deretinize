@@ -7,11 +7,11 @@ program_exists () {
 CONVERT=''
 
 if program_exists gm; then
-	CONVERT='convert'
+	CONVERT='gm convert'
 fi
 
 if [ -z "$CONVERT" ] && program_exists convert; then
-	CONVERT='gm convert'
+	CONVERT='convert'
 fi
 
 if [ -z "$CONVERT" ]; then
