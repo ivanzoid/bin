@@ -1,6 +1,12 @@
 #!/bin/bash
 
-if [ -x go ]; then
+set -e
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+if program_exists go; then
 	echo "setenv GOROOT `go env GOROOT`" > $HOME/.launchd.conf
 	echo "setenv GOPATH $HOME/Go" >> $HOME/.launchd.conf
 fi
