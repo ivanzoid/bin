@@ -1,0 +1,71 @@
+#!/usr/bin/perl
+# ONO Hiroki onohiroki@cup.com
+# http://onohiroki.cycling.jp/comp-google-latitude
+# Usage: $ ./latitude_kml2gpx.pl *.kml
+
+use strict;
+use warnings;
+use Data::Dumper;
+use Encode;
+use utf8;
+use open ":utf8";
+binmode STDIN,  ":utf8";
+binmode STDOUT, ":utf8";
+binmode STDERR, ":utf8";
+
+foreach my $datafile (@ARGV) {
+    printf "input: %-40s", $datafile;
+    my $filename_str = $datafile;
+    $filename_str =~ s/\.kml$//gi;
+    #$filename_str =~ s/[^A-Za-z]//gi;
+    my $output_filename = $filename_str.".gpx";
+
+    unless (open KMLFILE, "< $datafile") {
+        die "Cannot open file:$!";
+    }
+
+    unless (open GPXFILE, "> $output_filename") {
+        die "Cannot open file:$!";
+    }
+
+    print GPXFILE <<'EOS';
+<gpx xmlns="http://www.topografix.com/GPX/1/1"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ xsi:schemaLocation="http://www.topografix.com/GPX/1/1
+ http://www.topografix.com/GPX/1/1/gpx.xsd">
+ <trk>
+EOS
+
+    my $time = q{};
+    my $date = q{};
+    while (<KMLFILE>) {
+        if (m#<when>(.*)</when>#) {
+            $time = $1;
+            if ($date eq q{}) {
+                $date = $time;
+                $date =~ s/T.*$//;
+                print GPXFILE "  <name>$date</name>\n";
+                print GPXFILE "  <desc>$date</desc>\n";
+                print GPXFILE "  <trkseg>\n";
+            }
+            $time = convert_datetime($time);
+        }
+        if (m#<gx:coord>(\S+)\s+(\S+)\s+(\S+)</gx:coord>#) {
+            print GPXFILE q{   <trkpt lat="}.$2.q{" lon="}.$1.q{">};
+            print GPXFILE "\n    <ele>$3</ele>\n    <time>$time</time>\n   </trkpt>\n";
+        }
+    }
+    close KMLFILE;
+    print GPXFILE "  </trkseg>\n </trk>\n</gpx>\n";
+    close GPXFILE;
+    print " output: ", $output_filename;
+    print "\n";
+}
+
+sub convert_datetime {
+    use DateTime::Format::HTTP;
+    my $str = shift;
+    my $dt = DateTime::Format::HTTP->parse_datetime($str);
+    $dt->set_time_zone('+0000');
+    return $dt . "Z";
+}
