@@ -1,0 +1,7 @@
+#!/bin/bash
+
+if [ -x go ]; then
+	echo "export GOROOT=\"`go env GOROOT`\"" > $HOME/.go.conf
+	echo "export GOPATH=\"$HOME/Go\"" >> $HOME/.go.conf
+fi
+

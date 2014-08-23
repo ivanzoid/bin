@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ -x go ]; then
-	echo "setenv GOROOT `go env GOROOT`" > $HOME/.launchd.conf
-	echo "setenv GOPATH $HOME/Go" >> $HOME/.launchd.conf
+	echo "setenv GOROOT \"`go env GOROOT`\"" > $HOME/.launchd.conf
+	echo "setenv GOPATH \"$HOME/Go\"" >> $HOME/.launchd.conf
 fi
 
