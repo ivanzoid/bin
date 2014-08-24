@@ -1,0 +1,13 @@
+#!/bin/bash
+
+set -e
+
+program_exists () {
+	type "$1" &> /dev/null ;
+}
+
+if program_exists go; then
+	echo "export GOROOT=\"`go env GOROOT`\"" > $HOME/.go.conf
+	echo "export GOPATH=\"$HOME/Go\"" >> $HOME/.go.conf
+fi
+
