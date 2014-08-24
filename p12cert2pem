@@ -1,0 +1,43 @@
+#!/bin/bash
+
+program_exists ()
+{
+	type "$1" &> /dev/null ;
+}
+
+usage()
+{
+	local PROG_NAME=`basename $0`
+	echo "Usage: $PROG_NAME p12file [pemfile]"
+}
+
+main()
+{
+	set -e
+	set -o xtrace
+
+	if ! program_exists openssl; then
+		echo "Please install openssl"
+		exit 2
+	fi
+
+	if [ "$#" -lt 1 ]; then
+		usage
+		exit 1
+	fi
+
+	local P12_FILE=$1
+	local PEM_FILE=$2
+
+	if [ ! $PEM_FILE ];then
+   		PEM_FILE=${P12_FILE/p12/pem}
+	fi
+
+	openssl pkcs12 -clcerts -nokeys -in "$P12_FILE" -out "$PEM_FILE"
+
+ 	set +o xtrace
+}
+
+main "$@"
+
+
