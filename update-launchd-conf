@@ -7,7 +7,7 @@ program_exists () {
 }
 
 if program_exists go; then
-	echo "setenv GOROOT \"`go env GOROOT`\"" > $HOME/.launchd.conf
+	echo "setenv GOROOT /usr/local/opt/go/libexec" > $HOME/.launchd.conf
 	echo "setenv GOPATH \"$HOME/Go\"" >> $HOME/.launchd.conf
 fi
 

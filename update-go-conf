@@ -7,7 +7,7 @@ program_exists () {
 }
 
 if program_exists go; then
-	echo "export GOROOT=\"`go env GOROOT`\"" > $HOME/.go.conf
+	echo "export GOROOT=/usr/local/opt/go/libexec" > $HOME/.go.conf
 	echo "export GOPATH=\"$HOME/Go\"" >> $HOME/.go.conf
 fi
 
