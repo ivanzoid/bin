@@ -1,0 +1,29 @@
+#!/bin/bash
+
+main()
+{
+	set -e
+	set -o xtrace
+
+	branchName=$(git symbolic-ref --short HEAD)
+
+	git checkout -b ${branchName}-backup
+
+	git checkout master
+
+	git branch -D ${branchName}
+
+	git checkout -b ${branchName}
+
+	git merge --squash ${branchName}-backup
+
+	git add -A
+
+	git commit
+
+	echo "Now you may do \"git push --force origin $branchName\" (or without --force)"
+
+	set +o xtrace
+}
+
+main "$@"

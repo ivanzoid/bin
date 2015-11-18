@@ -26,8 +26,12 @@ main()
 	fi
 
 	local GPX_FILE=$1
+	local GPX_FILE_TMP="$1.tmp"
 
 	gpsbabel -i gpx -f "$GPX_FILE" -o gpx -F "$GPX_FILE"
+
+	sed '/<?xml version="1.0" encoding="UTF-8"?>/d' "$GPX_FILE" > "$GPX_FILE_TMP"
+	mv "$GPX_FILE_TMP" "$GPX_FILE"
 }
 
 main "$@"

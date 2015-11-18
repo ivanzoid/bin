@@ -1,4 +1,0 @@
-#!/bin/sh
-
-curl -A "Mozilla/5.0" --get --data-urlencode "&text=$*" "http://translate.google.com/translate_a/t?client=t&sl=auto&tl=en" 2>/dev/null | sed 's/\[\[\[\"//' | cut -d \" -f 1
-
