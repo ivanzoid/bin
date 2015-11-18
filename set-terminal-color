@@ -1,0 +1,12 @@
+#!/bin/bash
+
+set_bg () {
+  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1"
+}
+
+r=$(($1*256))
+g=$(($2*256))
+b=$(($3*256))
+a=$(($4*256))
+
+set_bg "{$r, $g, $b, $a}"
