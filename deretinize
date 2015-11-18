@@ -19,10 +19,10 @@ if [ -z "$CONVERT" ]; then
 	exit 1
 fi
 
-for f in $@; do
+for f in "$@"; do
 	if [[ $f == *@3x* ]]; then
-		FNAME_2x=${f/@3x/@2x}
-		FNAME_1x=${f/@3x/}
+		FNAME_2x="${f/@3x/@2x}"
+		FNAME_1x="${f/@3x/}"
 		echo "Converting $f to $FNAME_2x ..."
 		$CONVERT -resize 66.666%x66.666% "$f" "$FNAME_2x"
 		echo "Converting $f to $FNAME_1x ..."
