@@ -24,8 +24,10 @@ for f in "$@"; do
 		FNAME_2x="${f/@3x/@2x}"
 		FNAME_1x="${f/@3x/}"
 		echo "Converting $f to $FNAME_2x ..."
-		$CONVERT -resize 66.666%x66.666% "$f" "$FNAME_2x"
+		#$CONVERT "$f" -resize 66.666666% "$FNAME_2x"
+		$CONVERT "$f"  -colorspace RGB -filter LanczosRadius -distort Resize 66.666666% -colorspace sRGB "$FNAME_2x"
 		echo "Converting $f to $FNAME_1x ..."
-		$CONVERT -resize 33.333%x33.333% "$f" "$FNAME_1x"
+		#$CONVERT "$f" -resize 33.333333% "$FNAME_1x"
+		$CONVERT "$f"  -colorspace RGB -filter LanczosRadius -distort Resize 33.333333% -colorspace sRGB "$FNAME_1x"
 	fi
 done
