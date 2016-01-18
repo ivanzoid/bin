@@ -11,6 +11,8 @@ main()
 
 	git checkout master
 
+	git pull
+
 	git branch -D ${branchName}
 
 	git checkout -b ${branchName}
@@ -21,9 +23,11 @@ main()
 
 	git commit
 
-	echo "Now you may do \"git push --force origin $branchName\" (or without --force)"
-
 	set +o xtrace
+
+	echo
+	echo "Now you may do \"git push --force origin $branchName\" (or without --force)"
+	echo
 }
 
 main "$@"
