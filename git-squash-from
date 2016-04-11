@@ -1,0 +1,39 @@
+#!/bin/bash
+
+main()
+{
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name to squash from"
+	    exit -1
+	fi
+
+	set -e
+	set -o xtrace
+
+	branchName=$(git symbolic-ref --short HEAD)
+
+	git checkout -b ${branchName}-backup
+
+	git checkout $1
+
+	git pull
+
+	git branch -D ${branchName}
+
+	git checkout -b ${branchName}
+
+	git merge --squash ${branchName}-backup
+
+	git add -A
+
+	git commit
+
+	set +o xtrace
+
+	echo
+	echo "Now you may do \"git push --force <remote> $branchName\" (or regular push without --force)"
+	echo
+}
+
+main "$@"
+

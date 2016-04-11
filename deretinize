@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 program_exists () {
 	type "$1" &> /dev/null ;
@@ -21,13 +21,27 @@ fi
 
 for f in "$@"; do
 	if [[ $f == *@3x* ]]; then
-		FNAME_2x="${f/@3x/@2x}"
-		FNAME_1x="${f/@3x/}"
-		echo "Converting $f to $FNAME_2x ..."
-		#$CONVERT "$f" -resize 66.666666% "$FNAME_2x"
-		$CONVERT "$f"  -colorspace RGB -filter LanczosRadius -distort Resize 66.666666% -colorspace sRGB "$FNAME_2x"
-		echo "Converting $f to $FNAME_1x ..."
-		#$CONVERT "$f" -resize 33.333333% "$FNAME_1x"
-		$CONVERT "$f"  -colorspace RGB -filter LanczosRadius -distort Resize 33.333333% -colorspace sRGB "$FNAME_1x"
+		FILENAME_ORIG="${f/.png/_orig.png}"
+		FILENAME_3X=$f
+		FILENAME_2X="${f/@3x/@2x}"
+		FILENAME_1X="${f/@3x/}"
+
+		echo "Deretinizing ${f}:"
+
+		echo "Moving original file to $FILENAME_ORIG ..."
+		mv "$f" "$FILENAME_ORIG"
+
+		echo "Adding 3px border to image..."
+		CONVERT "$FILENAME_ORIG" -bordercolor none -border 3x3 "$FILENAME_3X"
+
+		echo "Converting $FILENAME_3X to $FILENAME_2X ..."
+		$CONVERT "$FILENAME_3X" -resize 66.666666% "$FILENAME_2X"
+		#$CONVERT "$FILENAME_3X"  -colorspace RGB -filter LanczosRadius -distort Resize 66.666666% -colorspace sRGB "$FILENAME_2X"
+
+		echo "Converting $FILENAME_3X to $FILENAME_1X ..."
+		$CONVERT "$FILENAME_3X" -resize 33.333333% "$FILENAME_1X"
+		#$CONVERT "$FILENAME_3X"  -colorspace RGB -filter LanczosRadius -distort Resize 33.333333% -colorspace sRGB "$FILENAME_1X"
+
+		echo
 	fi
 done

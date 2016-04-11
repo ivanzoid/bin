@@ -1,5 +1,24 @@
-#!/bin/sh
+#!/bin/bash
 
-USER='ivanzoid'
-bb create --username $USER --private --protocol ssh $1
+main()
+{
+	set -e
+
+	if [ "$#" -lt 1 ]; then
+		echo "Please provide repo name"
+		exit 1
+	fi
+
+	USER='ivanzoid'
+	PASS=`security find-internet-password -s bitbucket.org -w`
+	REPO_NAME=$1
+
+	curl --user $USER:$PASS "https://api.bitbucket.org/1.0/repositories/" --data name=$REPO_NAME --data is_private=true
+}
+
+main "$@"
+
+
+
+
 
