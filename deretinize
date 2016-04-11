@@ -32,7 +32,7 @@ for f in "$@"; do
 		mv "$f" "$FILENAME_ORIG"
 
 		echo "Adding 3px border to image..."
-		CONVERT "$FILENAME_ORIG" -bordercolor none -border 3x3 "$FILENAME_3X"
+		$CONVERT "$FILENAME_ORIG" -bordercolor none -border 3x3 "$FILENAME_3X"
 
 		echo "Converting $FILENAME_3X to $FILENAME_2X ..."
 		$CONVERT "$FILENAME_3X" -resize 66.666666% "$FILENAME_2X"
