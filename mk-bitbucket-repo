@@ -14,6 +14,10 @@ main()
 	REPO_NAME=$1
 
 	curl --user $USER:$PASS "https://api.bitbucket.org/1.0/repositories/" --data name=$REPO_NAME --data is_private=true
+
+	echo
+	echo
+	echo "git@bitbucket.org:${USER}/${REPO_NAME}.git"
 }
 
 main "$@"

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo "SELECT Filename FROM Images WHERE FolderID IN (SELECT FolderID from Folders WHERE Pathname == '${PWD}/') AND Rating == 4;" | sqlite3 "$HOME/.config/xnviewmp/XnView.db"

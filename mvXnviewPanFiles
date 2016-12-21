@@ -1,0 +1,21 @@
+#!/bin/bash
+
+main()
+{
+	set -e
+
+	PAN_FILES=$(lsXnviewPanFiles .)
+
+	if [ -z "$PAN_FILES" ]; then
+    	return
+	fi
+
+	mkdir -p '#Pan'
+
+	for f in $PAN_FILES; do
+		echo "$f..."
+		mv "$f" "#Pan/$f"
+	done
+}
+
+main "$@"
