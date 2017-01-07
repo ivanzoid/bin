@@ -2,8 +2,6 @@
 
 main()
 {
-	set -e
-
 	BEST_FILES=$(lsXnviewBestFiles .)
 
 	if [ -z "$BEST_FILES" ]; then
