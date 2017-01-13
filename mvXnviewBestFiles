@@ -2,7 +2,7 @@
 
 main()
 {
-	set -e
+	#set -e
 
 	BEST_FILES=$(lsXnviewBestFiles .)
 
