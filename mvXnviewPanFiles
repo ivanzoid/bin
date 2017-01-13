@@ -2,8 +2,6 @@
 
 main()
 {
-	set -e
-
 	PAN_FILES=$(lsXnviewPanFiles .)
 
 	if [ -z "$PAN_FILES" ]; then
