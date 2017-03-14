@@ -3,7 +3,7 @@
 HOSTNAME=`echo $@ | sed s/.*@//`
 
 set_bg () {
-  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1"
+  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1" > /dev/null 2&>1 
 }
 
 on_exit () {
