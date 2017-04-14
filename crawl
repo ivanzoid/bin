@@ -1,0 +1,3 @@
+#!/bin/bash
+
+exec wget -r -nH -np -m -e robots=off -R index.html* $*

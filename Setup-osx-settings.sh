@@ -104,10 +104,9 @@ defaults write NSGlobalDomain AppleKeyboardUIMode -int 3
 
 # Disable the default "press and hold" behavior.
 defaults write -g ApplePressAndHoldEnabled -bool false
-defaults write -g ApplePressAndHoldEnabled -bool false
 
 # Key Repeat Rate
-defaults write -g KeyRepeat -int 1
+defaults write -g KeyRepeat -int 2
 defaults write -g InitialKeyRepeat -int 10
 
 ## Trackpad
