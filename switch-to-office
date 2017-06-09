@@ -1,6 +1,7 @@
 #!/bin/bash
 
 /usr/libexec/PlistBuddy -c "Set :StandardViewOptions:ColumnViewOptions:FontSize 14" ~/Library/Preferences/com.apple.finder.plist
+/usr/libexec/PlistBuddy -c "Set :StandardViewSettings:ListViewSettings:textSize 14" ~/Library/Preferences/com.apple.finder.plist
 
 killall Finder
 

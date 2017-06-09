@@ -1,0 +1,9 @@
+#!/bin/bash
+
+main()
+{
+	git branch -r --merged master | egrep -iv 'master' | sed 's/origin\///g' | xargs -n 1 git push --delete origin
+}
+
+main "$@"
+
