@@ -1,0 +1,9 @@
+#!/bin/bash
+
+main()
+{
+	BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+	hub pull-request -m "$BRANCH_NAME"
+}
+
+main "$@"
