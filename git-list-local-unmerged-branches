@@ -1,0 +1,9 @@
+#!/bin/bash
+
+main()
+{
+	git branch --no-merged master 
+}
+
+main "$@"
+
