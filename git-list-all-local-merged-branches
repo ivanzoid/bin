@@ -1,9 +1,0 @@
-#!/bin/bash
-
-main()
-{
-	git branch --merged master | grep -v master
-}
-
-main "$@"
-

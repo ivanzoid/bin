@@ -1,8 +1,0 @@
-#!/bin/bash
-
-main()
-{
-	git branch -r --merged master | egrep -iv 'master' | sed 's/origin\///g'
-}
-
-main "$@"
