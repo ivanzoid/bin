@@ -1,0 +1,7 @@
+#!/bin/bash
+
+FILE=$1
+
+sed '/======/d' $FILE | sed '/<<<<</d' | sed '/>>>>>/d' > temp
+cat temp > $FILE
+rm temp

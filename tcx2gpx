@@ -1,0 +1,42 @@
+#!/bin/bash
+
+program_exists ()
+{
+	type "$1" &> /dev/null ;
+}
+
+usage()
+{
+	local PROG_NAME=`basename $0`
+	echo "Usage: $PROG_NAME tcxfile [gpxfile]"
+}
+
+main()
+{
+	set -e
+	#set -o xtrace
+
+	if ! program_exists gpsbabel; then
+		echo "Please install gpsbabel"
+		exit 2
+	fi
+
+	if [ "$#" -lt 1 ]; then
+		usage
+		exit 1
+	fi
+
+	local SRC_FILE=$1
+	local OUT_FILE=$2
+
+	if [ ! $OUT_FILE ];then
+   		OUT_FILE=${SRC_FILE/tcx/gpx}
+	fi
+
+	gpsbabel -i gtrnctr -f "$SRC_FILE" -o gpx -F "$OUT_FILE"
+
+ 	#set +o xtrace
+}
+
+main "$@"
+

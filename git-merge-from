@@ -1,0 +1,15 @@
+#!/bin/bash
+
+main()
+{
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name to merge from"
+	    exit -1
+	fi
+
+	git fetch
+	git merge origin/$1
+}
+
+main "$@"
+

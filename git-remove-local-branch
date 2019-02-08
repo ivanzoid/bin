@@ -1,0 +1,14 @@
+#!/bin/bash
+
+main()
+{
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name to delete"
+	    exit -1
+	fi
+
+	git branch -d $1
+}
+
+main "$@"
+

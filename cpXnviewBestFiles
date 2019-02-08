@@ -1,0 +1,21 @@
+#!/bin/bash
+
+main()
+{
+	#set -e
+
+	BEST_FILES=$(lsXnviewBestFiles .)
+
+	if [ -z "$BEST_FILES" ]; then
+    	return
+	fi
+
+	mkdir -p '#Best'
+
+	for f in $BEST_FILES; do
+		echo "$f..."
+		cp "$f" "#Best/$f"
+	done
+}
+
+main "$@"

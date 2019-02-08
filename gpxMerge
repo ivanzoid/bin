@@ -1,0 +1,10 @@
+#!/bin/bash
+
+ff=""
+for f in "$@"
+do 
+    ff="$ff -f '$f'"
+done
+
+cmd="gpsbabel -i gpx $ff -o gpx -F merged.gpx"
+echo $cmd
