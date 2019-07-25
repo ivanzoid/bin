@@ -2,8 +2,18 @@
 
 main()
 {
-	git branch -r --merged master | egrep -iv 'master' | sed 's/origin\///g' | xargs -n 1 git push --delete origin
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	branchesToRemove=$(git branch -r --merged $branch | grep -v "$branch" | grep -v 'master' | sed 's/origin\///g')
+
+	echo "Branches to remove:"
+	echo "$branchesToRemove"
+	echo $branchesToRemove | xargs -n 1 git push --delete origin
 }
 
 main "$@"
-

@@ -2,7 +2,19 @@
 
 main()
 {
-	git branch --merged master | grep -v master | xargs -n 1 git branch -D 
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	branchesToRemove=$(git branch --merged "$branch" | grep -v "$branch" | grep -v master)
+
+	echo "Branches to remove:"
+	echo "$branchesToRemove"
+
+	echo $branchesToRemove | xargs -n 1 git branch -D 
 }
 
 main "$@"

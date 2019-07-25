@@ -1,0 +1,29 @@
+#!/bin/bash
+
+main()
+{
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name to merge to"
+	    exit -1
+	fi
+
+	currentBranchName=$(git symbolic-ref --short HEAD)
+	branchToMerge=$1
+
+	git checkout ${branchToMerge}
+
+	git pull
+
+	if git merge ${currentBranchName} ; then
+		echo
+		echo "Merge succeeded. Now you may do git push"
+		echo
+	else
+		echo
+		echo "Merge failed."
+		echo
+	fi
+}
+
+main "$@"
+

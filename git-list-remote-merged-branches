@@ -2,7 +2,14 @@
 
 main()
 {
-	git branch -r --merged master | egrep -iv 'master' | sed 's/origin\///g'
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	git branch -r --merged $branch | grep -v "$branch" | grep -v 'master' | sed 's/origin\///g'
 }
 
 main "$@"

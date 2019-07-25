@@ -2,8 +2,14 @@
 
 main()
 {
-	git branch --merged master | grep -v master
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	git branch --merged $branch | grep -v 'master' | grep -v $branch
 }
 
 main "$@"
-

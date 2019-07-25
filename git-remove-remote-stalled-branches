@@ -2,7 +2,7 @@
 
 main()
 {
-	git branch --no-merged $1 
+	git remote prune origin
 }
 
 main "$@"
