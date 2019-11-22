@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 ## Safari
 # Enable Develop Menu and Web Inspector

@@ -1,41 +1,30 @@
-#!/bin/bash
+#!/bin/bash -x
 
 echo 'bash-completion
-cuetools
 exiftool
 ffmpeg
 flac
-ghostscript
 git
-gnuplot
 gpsbabel
-htop-osx
-hub
+htop
+httpie
 imagemagick
-jbig2dec
 jhead
 jq
-libvo-aacenc
+mackup
 macvim
 ivanzoid/tap/merge-xcodeproj
 midnight-commander
-mmv
-mplayer
 mtr
-mupdf-tools
 poppler
 python
 rmtrash
 ruby
-shntool
-uncrustify
-unrar
-ivanzoid/tap/viper-module-rename
-wget
-alexgarbarev/core/xc-resave' \
+wget' \
 	| xargs brew install
 
-brew tap caskroom/fonts
+brew tap homebrew/cask-fonts
 brew cask install font-go-mono
+brew cask install font-fira-code
 
-hardlink /usr/local/opt/macvim/MacVim.app /Applications/MacVim.app
+#hardlink /usr/local/opt/macvim/MacVim.app /Applications/MacVim.app
