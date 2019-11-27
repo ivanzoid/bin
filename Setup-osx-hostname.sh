@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 sudo scutil --set ComputerName $@
 sudo scutil --set HostName $@
