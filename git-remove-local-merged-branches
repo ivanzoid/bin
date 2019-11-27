@@ -9,7 +9,7 @@ main()
 
 	branch=$1
 
-	branchesToRemove=$(git branch --merged "$branch" | grep -v "$branch" | grep -v master)
+	branchesToRemove=$(git branch --merged "$branch" | grep -v "$branch" | grep -v master | grep -v '*')
 
 	echo "Branches to remove:"
 	echo "$branchesToRemove"

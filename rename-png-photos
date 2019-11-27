@@ -1,0 +1,5 @@
+#!/bin/bash
+
+for f in *.PNG; do
+    mv $f $(date -r "$f" +"%Y%m%d_%H%M%S").png
+done

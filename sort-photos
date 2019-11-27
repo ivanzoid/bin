@@ -1,0 +1,13 @@
+#!/bin/bash -x
+
+rmtrash *.AAE
+
+mkdir '#Vid'
+mv *.MOV '#Vid'
+cd '#Vid'
+rename-mov-videos
+cd ..
+
+rename-jpg-photos
+rename-png-photos
+rename-dng-photos
