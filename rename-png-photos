@@ -1,9 +1,10 @@
 #!/bin/bash
 
 for f in *.png; do
-    mv $f $(date -r "$f" +"%Y%m%d_%H%M%S").png
+    mv $f $(date -r "$f" +"%y%m%d_%H%M%S").png
+
 done
 
 for f in *.PNG; do
-    mv $f $(date -r "$f" +"%Y%m%d_%H%M%S").png
+    mv $f $(date -r "$f" +"%y%m%d_%H%M%S").png
 done
