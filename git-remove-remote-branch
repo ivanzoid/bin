@@ -7,7 +7,9 @@ main()
 	    exit -1
 	fi
 
-	git push origin --delete $1
+	branch=$1
+
+	git push origin --delete $branch
 }
 
 main "$@"

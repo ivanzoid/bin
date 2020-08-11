@@ -2,8 +2,14 @@
 
 main()
 {
-	git branch --no-merged $1 
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	git branch --no-merged $branch
 }
 
 main "$@"
-

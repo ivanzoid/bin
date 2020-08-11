@@ -7,8 +7,10 @@ main()
 	    exit -1
 	fi
 
+	branch=$1
+
 	git fetch
-	git merge origin/$1
+	git merge origin/$branch
 }
 
 main "$@"

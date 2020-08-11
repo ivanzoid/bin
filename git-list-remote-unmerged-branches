@@ -2,7 +2,14 @@
 
 main()
 {
-	git branch -r --no-merged origin/master
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide branch name"
+	    exit -1
+	fi
+
+	branch=$1
+
+	git branch -r --no-merged origin/$branch
 }
 
 main "$@"
