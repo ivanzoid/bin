@@ -2,11 +2,12 @@
 
 rmtrash *.AAE
 
-mkdir '#Vid'
-mv *.MOV '#Vid'
-cd '#Vid'
 rename-mov-videos
-cd ..
+rename-mp4-videos
+
+mkdir -p '#Vid'
+mv *.mov '#Vid'
+mv *.mp4 '#Vid'
 
 rename-jpg-photos
 rename-png-photos
