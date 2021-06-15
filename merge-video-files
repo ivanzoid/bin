@@ -1,0 +1,27 @@
+#!/bin/bash -ex
+
+usage()
+{
+	local PROG_NAME=`basename $0`
+	echo "Usage: $PROG_NAME ext"
+}
+
+main()
+{
+	if [ "$#" -lt 1 ]; then
+		usage
+		exit 1
+	fi
+
+    EXT=$1
+
+    for f in *.$EXT; do 
+        echo "file '$f'" >> list.txt
+    done
+
+    echo ffmpeg -f concat -safe 0 -i list.txt -map 0:v -map 0:a -c:a copy -c:v copy out.$EXT
+
+    echo rmtrash list.txt
+}
+
+main "$@"
