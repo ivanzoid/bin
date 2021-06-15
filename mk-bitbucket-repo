@@ -13,7 +13,13 @@ main()
 	PASS=`security find-internet-password -s bitbucket.org -w`
 	REPO_NAME=$1
 
-	curl --user $USER:$PASS "https://api.bitbucket.org/1.0/repositories/" --data name=$REPO_NAME --data is_private=true
+	curl -sS --location --fail -i -X POST \
+		-u "${USER}:${PASS}" \
+		-H "Content-Type: application/json" \
+		-d "{ \"description\": \"$REPO_NAME\", \"scm\": \"git\", \"is_private\": \"true\" }" \
+		"https://api.bitbucket.org/2.0/repositories/{$USER}/{$REPO_NAME}"
+
+	#curl --user $USER:$PASS "https://api.bitbucket.org/2.0/repositories/" --data name=$REPO_NAME --data is_private=true
 
 	echo
 	echo

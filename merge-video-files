@@ -19,9 +19,9 @@ main()
         echo "file '$f'" >> list.txt
     done
 
-    echo ffmpeg -f concat -safe 0 -i list.txt -map 0:v -map 0:a -c:a copy -c:v copy out.$EXT
+    ffmpeg -f concat -safe 0 -i list.txt -map 0:v -map 0:a -c:a copy -c:v copy out.$EXT
 
-    echo rmtrash list.txt
+    rmtrash list.txt
 }
 
 main "$@"
