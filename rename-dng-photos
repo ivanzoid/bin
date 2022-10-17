@@ -1,5 +1,5 @@
 #!/bin/bash
 
 for f in *.dng; do
-    mv $f $(date -r "$f" +"%y%m%d_%H%M%S").dng
+    mv $f $(date -r "$f" +"%Y%m%d_%H%M%S").dng
 done

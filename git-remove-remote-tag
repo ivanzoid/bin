@@ -1,0 +1,16 @@
+#!/bin/bash
+
+main()
+{
+	if [ "$#" -ne 1 ]; then
+	    echo "Please provide tag name to delete"
+	    exit -1
+	fi
+
+	tag=$1
+
+	git push origin :tag
+}
+
+main "$@"
+

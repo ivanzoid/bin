@@ -1,0 +1,46 @@
+#!/bin/bash
+
+usage()
+{
+	local PROG_NAME=`basename $0`
+	echo "Usage: $PROG_NAME params"
+}
+
+program_exists ()
+{
+    type "$1" &> /dev/null ;
+}
+
+main()
+{
+	#set -o xtrace
+	set -o errexit
+
+	if [ "$#" -lt 1 ]; then
+		usage
+		exit 1
+	fi
+
+    if ! program_exists gpxinfo; then
+        echo "Please install gpxinfo (https://github.com/tkrajina/gpx-cmd-tools): pip install gpx-cmd-tools"
+        exit 1
+    fi
+
+	FILE="$1"
+
+	gpxinfo -t -s "$FILE"
+
+	NAME=${FILE/.gpx/}
+	LENGTH=$(gpxinfo -t -s "$FILE" | grep 'Length 3D' | sed -En 's/\ \ \ \ Length\ 3D:\ //p' | sed -En 's/km//p') 
+	STARTED=$(gpxinfo -t -s "$FILE" | grep 'Started' | sed -En 's/\ \ \ \ Started:\ //p')
+
+	if [ "$STARTED" = "None" ]; then
+		STARTED=$(date -r "$FILE" +"%Y%m%d_%H%M%S")
+	else
+	 	STARTED=$(echo $STARTED | sed -En 's/\+00:00//gp' | sed -En 's/://gp' | sed -En 's/-//gp' | sed -En 's/\ /_/gp')
+	fi
+
+	mv "$FILE" "${STARTED}_${LENGTH}_${NAME}.gpx"
+}
+
+main "$@"

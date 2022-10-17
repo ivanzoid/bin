@@ -3,18 +3,14 @@
 HOSTNAME=`echo $@ | sed s/.*@//`
 
 set_bg () {
-  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1" > /dev/null 2>&1 
+#	return
+  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1" > /dev/null 2>&1 &
 }
 
 on_exit () {
   set_bg "{65535, 65535, 65535, 65535}"
 }
 trap on_exit EXIT
-
-#case $HOSTNAME in
-#  production1|production2|production3) set_bg "{45000, 0, 0, 50000}" ;;
-#  *) set_bg "{0, 45000, 0, 50000}" ;;
-#esac
 
 set_bg "{65535, 60000, 60000, 65535}"
 
