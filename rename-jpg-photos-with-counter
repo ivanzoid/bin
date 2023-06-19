@@ -1,0 +1,5 @@
+#!/bin/bash
+
+jhead '-n%Y%m%d_%H%M%S_%04i' *.jpg
+jhead '-n%Y%m%d_%H%M%S_%04i' *.jpeg
+jhead '-n%Y%m%d_%H%M%S_%04i' *.JPG
