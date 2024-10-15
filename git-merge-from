@@ -9,7 +9,7 @@ main()
 
 	branch=$1
 
-	git fetch
+	git fetch origin $branch:$branch
 	git merge origin/$branch
 }
 
