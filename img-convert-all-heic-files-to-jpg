@@ -1,3 +1,4 @@
 #!/bin/bash
 
-for f in *.HEIC; do convert "$f" -quality 95 "${f/HEIC/jpg}" ; done ; rmtrash *.HEIC
+for f in *.HEIC; do magick convert "$f" -quality 95 "${f/HEIC/jpg}" ; done ; rmtrash *.HEIC
+for f in *.heic; do magick convert "$f" -quality 95 "${f/heic/jpg}" ; done ; rmtrash *.heic

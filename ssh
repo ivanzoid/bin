@@ -1,17 +1,96 @@
-#!/bin/sh
+#!/bin/bash
+# Wrapper for ssh that sets a light background color based on user@host
+# The color list is hard‑coded – no runtime generation.
 
-HOSTNAME=`echo $@ | sed s/.*@//`
+# ---------- HARD‑CODED LIGHT COLORS (generated once) ----------
+LIGHT_COLORS=(
+	"rgb:F6/EE/EE"
+	"rgb:F6/F2/EE"
+	"rgb:F6/F6/EE"
+	"rgb:F2/F6/EE"
+	"rgb:EE/F6/EE"
+	"rgb:EE/F6/F2"
+	"rgb:EE/F6/F6"
+	"rgb:EE/F2/F6"
+	"rgb:EE/EE/F6"
+	"rgb:F2/EE/F6"
+	"rgb:F6/EE/F6"
+	"rgb:F6/EE/F2"
+)
+NUM_COLORS=${#LIGHT_COLORS[@]}
 
-set_bg () {
-#	return
-  osascript -e "tell application \"Terminal\" to set background color of window 1 to $1" > /dev/null 2>&1 &
+# ---------- Parse ssh arguments to extract user and host ----------
+parse_target() {
+    local user="" host=""
+    local skip_next=0
+    for arg in "$@"; do
+        if [[ $skip_next -eq 1 ]]; then
+            skip_next=0
+            continue
+        fi
+        case "$arg" in
+            -l)
+                skip_next=1
+                ;;
+            -p|-o|-F|-i|-J|-w|-c|-m|-E|-L|-R|-D|-O|-S|-W)
+                skip_next=1
+                ;;
+            -*)
+                # ignore other options
+                ;;
+            *)
+                # first non‑option argument: destination
+                if [[ "$arg" == *"@"* ]]; then
+                    user="${arg%%@*}"
+                    host="${arg#*@}"
+                else
+                    host="$arg"
+                fi
+                break
+                ;;
+        esac
+    done
+
+    # If a -l option was given, we already captured the user in the next argument,
+    # but our simple parser above only sets skip_next. We'll rescan for -l explicitly.
+    local prev_was_l=0
+    for arg in "$@"; do
+        if [[ $prev_was_l -eq 1 ]]; then
+            user="$arg"
+            prev_was_l=0
+            continue
+        fi
+        [[ "$arg" == "-l" ]] && prev_was_l=1
+    done
+
+    [[ -z "$user" ]] && user="$USER"
+    echo "$user@$host"
 }
 
-on_exit () {
-  set_bg "{65535, 65535, 65535, 65535}"
+target=$(parse_target "$@")
+if [[ -z "$target" || "$target" == "@" ]]; then
+    # No remote host – just run ssh normally
+    exec /usr/bin/ssh "$@"
+fi
+
+# Deterministic index based on user@host
+hash=$(printf "%s" "$target" | cksum | cut -d' ' -f1)
+index=$(( hash % NUM_COLORS ))
+bg_color="${LIGHT_COLORS[$index]}"
+
+# ---------- Trap to restore background ----------
+restore_bg() {
+    printf '\e]111\a' >/dev/tty   # reset background to default
+    trap - EXIT INT TERM
 }
-trap on_exit EXIT
+trap restore_bg EXIT INT TERM
 
-set_bg "{65535, 60000, 60000, 65535}"
+# Apply the chosen light background
+printf '\e]11;%s\a' "$bg_color" >/dev/tty
 
+# Run the real ssh
 /usr/bin/ssh "$@"
+ret=$?
+
+restore_bg
+exit $ret

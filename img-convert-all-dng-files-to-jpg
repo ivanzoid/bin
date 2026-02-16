@@ -1,0 +1,18 @@
+#!/bin/bash
+
+EXT='DNG'
+
+for f in *.$EXT; do 
+	echo "$f..."
+	magick  "$f" -quality 95 "${f/$EXT/jpg}"
+done
+rmtrash *.$EXT
+
+EXT='dng'
+
+for f in *.$EXT; do 
+	echo "$f..."
+	magick  "$f" -quality 95 "${f/$EXT/jpg}"
+done
+rmtrash *.$EXT
+
