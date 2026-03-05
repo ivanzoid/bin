@@ -3,20 +3,44 @@
 # The color list is hard‑coded – no runtime generation.
 
 # ---------- HARD‑CODED LIGHT COLORS (generated once) ----------
+
 LIGHT_COLORS=(
-	"rgb:F6/EE/EE"
-	"rgb:F6/F2/EE"
-	"rgb:F6/F6/EE"
-	"rgb:F2/F6/EE"
-	"rgb:EE/F6/EE"
-	"rgb:EE/F6/F2"
-	"rgb:EE/F6/F6"
-	"rgb:EE/F2/F6"
-	"rgb:EE/EE/F6"
-	"rgb:F2/EE/F6"
-	"rgb:F6/EE/F6"
-	"rgb:F6/EE/F2"
+    "rgb:F6/F2/E6"  # Softer Warm Yellow
+    "rgb:EF/F6/F2"  # Lighter Mint
+    "rgb:F7/F2/F2"  # Softer Pink
+    "rgb:F2/F7/F9"  # Softer Cyan
+    "rgb:F3/F8/F3"  # Softer Green
+    "rgb:F3/F3/F8"  # Softer Blue
+    "rgb:F6/F2/F8"  # Softer Purple
+    "rgb:F8/F3/EE"  # Softer Peach
 )
+
+#LIGHT_COLORS=(
+#    "rgb:FF/F8/DC"  # Lighter Warm Yellow
+#    "rgb:EC/FF/F8"  # Lighter Mint
+#    "rgb:FF/EC/EC"  # Lighter Pink
+#    "rgb:EC/FB/FF"  # Lighter Cyan
+#    "rgb:F0/FF/F0"  # Lighter Green
+#    "rgb:F0/F0/FF"  # Lighter Blue
+#    "rgb:FA/F0/FF"  # Lighter Purple
+#    "rgb:FF/F5/ED"  # Lighter Peach
+#)
+
+#LIGHT_COLORS=(
+#	"rgb:F6/EE/EE"
+#	"rgb:F6/F2/EE"
+#	"rgb:F6/F6/EE"
+#	"rgb:F2/F6/EE"
+#	"rgb:EE/F6/EE"
+#	"rgb:EE/F6/F2"
+#	"rgb:EE/F6/F6"
+#	"rgb:EE/F2/F6"
+#	"rgb:EE/EE/F6"
+#	"rgb:F2/EE/F6"
+#	"rgb:F6/EE/F6"
+#	"rgb:F6/EE/F2"
+#)
+
 NUM_COLORS=${#LIGHT_COLORS[@]}
 
 # ---------- Parse ssh arguments to extract user and host ----------

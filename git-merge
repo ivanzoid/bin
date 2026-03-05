@@ -10,7 +10,7 @@ main()
 	branch=$1
 
 	git fetch origin $branch:$branch
-	git merge origin/$branch
+	git merge $branch
 }
 
 main "$@"
