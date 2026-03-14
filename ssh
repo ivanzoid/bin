@@ -92,8 +92,8 @@ parse_target() {
 }
 
 target=$(parse_target "$@")
-if [[ -z "$target" || "$target" == "@" ]]; then
-    # No remote host – just run ssh normally
+if [[ -z "$target" || "$target" == "@" ]] || [[ ! -e /dev/tty ]]; then
+    # No remote host or no TTY – just run ssh normally
     exec /usr/bin/ssh "$@"
 fi
 
