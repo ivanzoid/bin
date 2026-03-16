@@ -104,13 +104,13 @@ bg_color="${LIGHT_COLORS[$index]}"
 
 # ---------- Trap to restore background ----------
 restore_bg() {
-    printf '\e]111\a' >/dev/tty   # reset background to default
+    printf '\e]111\a' >/dev/tty 2>/dev/null  # reset background to default
     trap - EXIT INT TERM
 }
 trap restore_bg EXIT INT TERM
 
 # Apply the chosen light background
-printf '\e]11;%s\a' "$bg_color" >/dev/tty
+printf '\e]11;%s\a' "$bg_color" >/dev/tty 2>/dev/null
 
 # Run the real ssh
 /usr/bin/ssh "$@"
