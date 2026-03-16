@@ -60,10 +60,8 @@ parse_target() {
                 skip_next=1
                 ;;
             -*)
-                # ignore other options
                 ;;
             *)
-                # first non‑option argument: destination
                 if [[ "$arg" == *"@"* ]]; then
                     user="${arg%%@*}"
                     host="${arg#*@}"
@@ -75,8 +73,6 @@ parse_target() {
         esac
     done
 
-    # If a -l option was given, we already captured the user in the next argument,
-    # but our simple parser above only sets skip_next. We'll rescan for -l explicitly.
     local prev_was_l=0
     for arg in "$@"; do
         if [[ $prev_was_l -eq 1 ]]; then
@@ -92,8 +88,7 @@ parse_target() {
 }
 
 target=$(parse_target "$@")
-if [[ -z "$target" || "$target" == "@" ]] || [[ ! -e /dev/tty ]]; then
-    # No remote host or no TTY – just run ssh normally
+if [[ -z "$target" || "$target" == "@" ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
     exec /usr/bin/ssh "$@"
 fi
 
