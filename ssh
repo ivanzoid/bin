@@ -88,7 +88,7 @@ parse_target() {
 }
 
 target=$(parse_target "$@")
-if [[ -z "$target" || "$target" == "@" ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
+if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
     exec /usr/bin/ssh "$@"
 fi
 
