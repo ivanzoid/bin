@@ -34,7 +34,7 @@ if [ -z "`eval $GET_ID`" ]; then
 fi
 
 if [ "$#" -lt 1 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-  echo "Usage: $0 [-i [identity_file]] [user@]machine" >&2
+  echo "Usage: $0 [-i [identity_file.pub]] [user@]machine" >&2
   exit 1
 fi
 
