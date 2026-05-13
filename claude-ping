@@ -2,7 +2,7 @@
 # Start a minimal Claude Code session to anchor a 5-hour usage window.
 # Intended to be triggered by cron at strategic times.
 
-LOG="$HOME/.claude_window_ping.log"
+LOG="$HOME/.claude_ping.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M %Z')
 
 echo "$TIMESTAMP - starting window ping" >> "$LOG"
