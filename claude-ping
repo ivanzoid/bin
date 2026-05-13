@@ -5,11 +5,11 @@
 LOG="$HOME/.claude_ping.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M %Z')
 
-echo "$TIMESTAMP - starting window ping" >> "$LOG"
+echo "$TIMESTAMP - starting ping" >> "$LOG"
 
 # Run a minimal prompt that uses negligible tokens
 if "$HOME/.local/bin/claude" -p "reply with 'ok'" --model haiku > /dev/null 2>&1; then
-    echo "$TIMESTAMP - window ping OK" >> "$LOG"
+    echo "$TIMESTAMP - ping OK" >> "$LOG"
 else
-    echo "$TIMESTAMP - window ping FAILED (exit $?)" >> "$LOG"
+    echo "$TIMESTAMP - ping FAILED (exit $?)" >> "$LOG"
 fi
