@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# docker compose containers, as a tree grouped by project working dir + up/down status.
+#   dps         tree only
+#   dps -m      also show per-container memory + per-group subtotals + grand total
+#               (memory is reported for running containers only)
+
+set -euo pipefail
+
+ps_fmt='{{.Label "com.docker.compose.project.working_dir"}}\t{{.Names}}\t{{.Status}}'
+
+case "${1:-}" in
+  -m | --mem)
+    # Join two sources on container name: docker stats (memory, running only)
+    # is loaded into a map first (NR==FNR), then docker ps rows are buffered so
+    # each group's subtotal can be printed on its header line from END.
+    # Memory figures are dimmed gray, but only when stdout is a terminal.
+    clr=0; if [ -t 1 ]; then clr=1; fi
+    awk -v color="$clr" -F'\t' '
+      BEGIN { if(color){ g="\033[90m"; r="\033[0m" } }
+      function human(b,   u,i){
+        split("B K M G T",u," "); i=1
+        while(b>=1024 && i<5){ b/=1024; i++ }
+        return sprintf((b>=10 ? "%.0f%s" : "%.1f%s"), b, u[i])
+      }
+      function tobytes(s,   n,unit){
+        n=s+0; unit=s; sub(/^[0-9.]+/,"",unit)
+        if(unit=="KiB"||unit=="kB") return n*1024
+        if(unit=="MiB"||unit=="MB") return n*1024*1024
+        if(unit=="GiB"||unit=="GB") return n*1024*1024*1024
+        if(unit=="TiB"||unit=="TB") return n*1024*1024*1024*1024
+        return n
+      }
+      NR==FNR { split($2,a," / "); mem[$1]=tobytes(a[1]); next }
+      {
+        n++; dir[n]=$1; name[n]=$2; stat[n]=$3
+        if($2 in mem){ grp[$1]+=mem[$2]; total+=mem[$2] }
+      }
+      END {
+        p=""
+        for(i=1;i<=n;i++){
+          if(dir[i]!=p){
+            p=dir[i]
+            if(grp[p]>0) printf "%s  %s%s%s\n", p, g, human(grp[p]), r; else print p
+          }
+          s=(stat[i]~/^Up/)?"up ─":"down"
+          extra=(name[i] in mem)?"  " g human(mem[name[i]]) r:""
+          print "└─ " s " " name[i] extra
+        }
+        if(total>0) printf "\n%sTotal  %s%s\n", g, human(total), r
+      }
+    ' <(docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}') \
+      <(docker ps -a --format "$ps_fmt" | sort)
+    ;;
+  "")
+    docker ps -a --format "$ps_fmt" | sort \
+      | awk -F'\t' '$1!=p{print $1;p=$1} {s=($3~/^Up/)?"up ─":"down"; print "└─ " s " " $2}'
+    ;;
+  *)
+    echo "usage: dps [-m|--mem]" >&2
+    exit 2
+    ;;
+esac

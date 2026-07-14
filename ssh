@@ -87,8 +87,34 @@ parse_target() {
     echo "$user@$host"
 }
 
+# ---------- Detect the terminal's current background (skip tint on dark themes) ----------
+terminal_bg_is_dark() {
+    # Ask the terminal for its background color via OSC 11 and decide if it's dark.
+    # Returns 0 (dark) / 1 (light or unknown). Works with Ghostty et al.
+    local old_stty response
+    old_stty=$(stty -g </dev/tty 2>/dev/null) || return 1
+    stty raw -echo min 0 time 5 </dev/tty 2>/dev/null
+    printf '\e]11;?\a' >/dev/tty
+    IFS= read -r -t 1 -d $'\a' response </dev/tty 2>/dev/null
+    stty "$old_stty" </dev/tty 2>/dev/null
+
+    # Response looks like: ...]11;rgb:rrrr/gggg/bbbb  (2 or 4 hex digits per channel)
+    [[ "$response" =~ rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+) ]] || return 1
+    local r=$((16#${BASH_REMATCH[1]:0:2}))
+    local g=$((16#${BASH_REMATCH[2]:0:2}))
+    local b=$((16#${BASH_REMATCH[3]:0:2}))
+    # Perceived luminance (0–255); below 128 means a dark background.
+    local lum=$(( (r*299 + g*587 + b*114) / 1000 ))
+    [[ $lum -lt 128 ]]
+}
+
 target=$(parse_target "$@")
 if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
+    exec /usr/bin/ssh "$@"
+fi
+
+# Don't apply a light tint when a dark terminal theme is active.
+if terminal_bg_is_dark; then
     exec /usr/bin/ssh "$@"
 fi
 

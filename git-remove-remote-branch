@@ -2,15 +2,12 @@
 
 main()
 {
-	if [ "$#" -ne 1 ]; then
-	    echo "Please provide branch name to delete"
+	if [ "$#" -lt 1 ]; then
+	    echo "Please provide branch name(s) to delete"
 	    exit -1
 	fi
 
-	branch=$1
-
-	git push origin --delete $branch
+	git push origin --delete "$@"
 }
 
 main "$@"
-

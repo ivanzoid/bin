@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# git-squash-branch — squash a range of commits onto a brand-new branch,
+# leaving the source branch untouched.
+#
+# Usage:
+#   git squash-branch <base> [-b new-branch] [-m message] [-s source-branch]
+#
+#   <base>           Commit to squash *up to* (exclusive). Required.
+#   -b new-branch    Name of the new branch. Default: <source>-squash[-N].
+#   -m message       Commit message. Default: auto-generated from the
+#                    subjects of the commits being squashed.
+#   -s source-branch Branch to squash. Default: the current branch.
+#
+# Example:
+#   git squash-branch main             # squash current branch's commits past main
+#   git squash-branch HEAD~5 -b cleanup # squash last 5 commits onto branch "cleanup"
+#
+set -euo pipefail
+
+usage() {
+  sed -n '3,17p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+new_branch=""
+message=""
+source_branch=""
+
+while getopts ":b:m:s:h" opt; do
+  case "$opt" in
+    b) new_branch="$OPTARG" ;;
+    m) message="$OPTARG" ;;
+    s) source_branch="$OPTARG" ;;
+    h) usage; exit 0 ;;
+    \?) echo "error: unknown option -$OPTARG" >&2; usage; exit 1 ;;
+    :)  echo "error: option -$OPTARG requires an argument" >&2; exit 1 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# --- Validate <base> -------------------------------------------------------
+base="${1:-}"
+if [ -z "$base" ]; then
+  echo "error: <base> commit is required" >&2
+  usage
+  exit 1
+fi
+if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
+  echo "error: '$base' is not a valid commit" >&2
+  exit 1
+fi
+
+# --- Refuse to run with a dirty tree (merge --squash would clobber it) -----
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "error: working tree has uncommitted changes; commit or stash first" >&2
+  exit 1
+fi
+
+# --- Resolve source branch BEFORE we switch away from it -------------------
+source_branch="${source_branch:-$(git rev-parse --abbrev-ref HEAD)}"
+
+count=$(git rev-list --count "${base}..${source_branch}")
+if [ "$count" -eq 0 ]; then
+  echo "error: no commits between '$base' and '$source_branch' to squash" >&2
+  exit 1
+fi
+
+# --- Auto-generate a branch name if none was given -------------------------
+if [ -z "$new_branch" ]; then
+  candidate="${source_branch}-squash"
+  new_branch="$candidate"
+  n=1
+  while git show-ref --verify --quiet "refs/heads/${new_branch}"; do
+    n=$((n + 1))
+    new_branch="${candidate}-${n}"
+  done
+fi
+
+# --- Auto-generate a commit message if none was given ----------------------
+if [ -z "$message" ]; then
+  # Oldest-first list of the squashed commit subjects.
+  subjects=$(git log --reverse --format='- %s' "${base}..${source_branch}")
+  headline="${subjects#- }"      # first bullet, sans the "- " prefix
+  headline="${headline%%$'\n'*}" # ...trimmed to its first line
+  message=$(printf '%s\n\nSquashed %d commit(s) from %s:\n%s\n' \
+    "$headline" "$count" "$source_branch" "$subjects")
+fi
+
+# --- Do the work -----------------------------------------------------------
+git switch -c "$new_branch" "$base"
+git merge --squash "$source_branch"
+git commit -m "$message"
+
+echo
+echo "✓ Squashed $count commit(s) from '$source_branch' onto new branch '$new_branch' (base: $base)."
+echo "  '$source_branch' is unchanged. Review with: git log -1 --stat"
