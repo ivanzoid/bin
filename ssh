@@ -10,10 +10,11 @@
 # appearance and re-emits the matching tint mid-session — the OSC 11 write goes
 # straight to /dev/tty (Ghostty), so it reaches through mosh/tmux/zsh.
 #
-# The monitor reacts instantly to SIGUSR1 ("re-check appearance now") and also
-# polls every SSH_TINT_POLL seconds as a fallback (default 15; set 0 to disable
-# polling and rely only on SIGUSR1). Flip every live session at once with the
-# companion `ssh-tint-flip` — bind it to a hotkey or an appearance-change hook.
+# The monitor reacts instantly to SIGUSR1 ("re-check appearance now"). Flip
+# every live session at once with the companion `ssh-tint-flip` — the bundled
+# Hammerspoon config (~/.hammerspoon/init.lua) wires it to macOS appearance
+# changes. Set SSH_TINT_POLL to a positive number of seconds to also poll as a
+# fallback (default 0 = signal-only, since Hammerspoon covers the event).
 
 self="$(basename "$0")"   # "ssh" or "mosh"
 
@@ -181,7 +182,7 @@ index=$(( hash % NUM_COLORS ))
 # Keep the tint in sync with the macOS appearance. Reacts instantly to SIGUSR1
 # ("re-check now"); polls every SSH_TINT_POLL seconds as a fallback (0 = never).
 # `ssh-tint-flip` sends SIGUSR1 to every registered monitor at once.
-POLL=${SSH_TINT_POLL:-15}
+POLL=${SSH_TINT_POLL:-0}
 TINT_DIR="/tmp/ssh-tint-${UID}"
 PIDFILE=""
 
