@@ -1,6 +1,11 @@
 #!/bin/bash
-# Wrapper for ssh that sets a light background color based on user@host
-# The color list is hard‑coded – no runtime generation.
+# Wrapper for ssh AND mosh that sets a light background color based on user@host.
+# `mosh` is a symlink to this file; the script branches on its invocation name
+# ($0). For mosh to a .local host it also forces IPv4, because macOS mDNS returns
+# a dual A/AAAA result that hangs mosh's fake-proxy before mosh-client starts.
+# The color list is hard-coded – no runtime generation.
+
+self="$(basename "$0")"   # "ssh" or "mosh"
 
 # ---------- HARD‑CODED LIGHT COLORS (generated once) ----------
 
@@ -43,7 +48,30 @@ LIGHT_COLORS=(
 
 NUM_COLORS=${#LIGHT_COLORS[@]}
 
-# ---------- Parse ssh arguments to extract user and host ----------
+# ---------- Resolve the real backend binary (never this wrapper) ----------
+resolve_backend() {
+    if [[ "$self" != mosh ]]; then
+        printf '%s\n' /usr/bin/ssh
+        return 0
+    fi
+    # Find the first `mosh` in PATH that is NOT this script (the symlink).
+    local d IFS=:
+    for d in $PATH; do
+        [[ -x "$d/mosh" ]] || continue
+        [[ "$d/mosh" -ef "${BASH_SOURCE[0]}" ]] && continue   # that's us
+        printf '%s\n' "$d/mosh"
+        return 0
+    done
+    # Fallback: common install locations (Mac Homebrew, Linux brew, system).
+    for d in /opt/homebrew/bin /usr/local/bin /home/linuxbrew/.linuxbrew/bin /usr/bin; do
+        [[ -x "$d/mosh" && ! "$d/mosh" -ef "${BASH_SOURCE[0]}" ]] && { printf '%s\n' "$d/mosh"; return 0; }
+    done
+    return 1
+}
+
+REAL="$(resolve_backend)" || { echo "${self}: real ${self} binary not found" >&2; exit 127; }
+
+# ---------- Parse ssh/mosh arguments to extract user and host ----------
 parse_target() {
     local user="" host=""
     local skip_next=0
@@ -109,13 +137,20 @@ terminal_bg_is_dark() {
 }
 
 target=$(parse_target "$@")
+
+# mosh + .local host: force IPv4 (see header). Skip if the user already set --family.
+ARGS=("$@")
+if [[ "$self" == mosh && "$target" == *.local* && "$*" != *--family* ]]; then
+    ARGS=(--family=inet "$@")
+fi
+
 if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
-    exec /usr/bin/ssh "$@"
+    exec "$REAL" "${ARGS[@]}"
 fi
 
 # Don't apply a light tint when a dark terminal theme is active.
 if terminal_bg_is_dark; then
-    exec /usr/bin/ssh "$@"
+    exec "$REAL" "${ARGS[@]}"
 fi
 
 # Deterministic index based on user@host
@@ -133,8 +168,8 @@ trap restore_bg EXIT INT TERM
 # Apply the chosen light background
 printf '\e]11;%s\a' "$bg_color" >/dev/tty 2>/dev/null
 
-# Run the real ssh
-/usr/bin/ssh "$@"
+# Run the real backend
+"$REAL" "${ARGS[@]}"
 ret=$?
 
 restore_bg
