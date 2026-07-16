@@ -1,0 +1,20 @@
+#!/bin/bash
+# Poke every live ssh/mosh background-tint monitor (see the `ssh` wrapper) to
+# re-check the macOS appearance and re-tint right now — no polling needed.
+# Bind to a hotkey, or call from an appearance-change hook, to flip every open
+# session at once. Stale PID files are cleaned up as we go.
+
+TINT_DIR="/tmp/ssh-tint-${UID}"
+shopt -s nullglob
+
+n=0
+for f in "$TINT_DIR"/*; do
+    pid="$(basename "$f")"
+    if kill -USR1 "$pid" 2>/dev/null; then
+        n=$((n + 1))
+    else
+        rm -f "$f" 2>/dev/null   # monitor gone; drop the stale entry
+    fi
+done
+
+echo "ssh-tint-flip: signaled $n session(s)"

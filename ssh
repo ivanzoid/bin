@@ -1,9 +1,19 @@
 #!/bin/bash
-# Wrapper for ssh AND mosh that sets a light background color based on user@host.
+# Wrapper for ssh AND mosh that tints the terminal background based on user@host.
 # `mosh` is a symlink to this file; the script branches on its invocation name
 # ($0). For mosh to a .local host it also forces IPv4, because macOS mDNS returns
 # a dual A/AAAA result that hangs mosh's fake-proxy before mosh-client starts.
-# The color list is hard-coded – no runtime generation.
+#
+# The tint follows the macOS appearance: a light tint in light mode, a dark tint
+# in dark mode, both drawn from hard-coded parallel palettes (no runtime
+# generation). A background monitor keeps the tint in sync with the macOS
+# appearance and re-emits the matching tint mid-session — the OSC 11 write goes
+# straight to /dev/tty (Ghostty), so it reaches through mosh/tmux/zsh.
+#
+# The monitor reacts instantly to SIGUSR1 ("re-check appearance now") and also
+# polls every SSH_TINT_POLL seconds as a fallback (default 15; set 0 to disable
+# polling and rely only on SIGUSR1). Flip every live session at once with the
+# companion `ssh-tint-flip` — bind it to a hotkey or an appearance-change hook.
 
 self="$(basename "$0")"   # "ssh" or "mosh"
 
@@ -45,6 +55,20 @@ LIGHT_COLORS=(
 #	"rgb:F6/EE/F6"
 #	"rgb:F6/EE/F2"
 #)
+
+# Dark-mode counterparts, index-aligned with LIGHT_COLORS (same hue families,
+# very dark so the tint is a subtle cast over a near-black background). Tweak
+# freely like the light ones.
+DARK_COLORS=(
+    "rgb:1C/18/0E"  # Warm Yellow
+    "rgb:0E/1C/16"  # Mint
+    "rgb:1E/12/14"  # Pink
+    "rgb:0E/18/1E"  # Cyan
+    "rgb:10/1C/10"  # Green
+    "rgb:10/10/20"  # Blue
+    "rgb:1A/10/20"  # Purple
+    "rgb:20/14/0E"  # Peach
+)
 
 NUM_COLORS=${#LIGHT_COLORS[@]}
 
@@ -115,25 +139,26 @@ parse_target() {
     echo "$user@$host"
 }
 
-# ---------- Detect the terminal's current background (skip tint on dark themes) ----------
-terminal_bg_is_dark() {
-    # Ask the terminal for its background color via OSC 11 and decide if it's dark.
-    # Returns 0 (dark) / 1 (light or unknown). Works with Ghostty et al.
-    local old_stty response
-    old_stty=$(stty -g </dev/tty 2>/dev/null) || return 1
-    stty raw -echo min 0 time 5 </dev/tty 2>/dev/null
-    printf '\e]11;?\a' >/dev/tty
-    IFS= read -r -t 1 -d $'\a' response </dev/tty 2>/dev/null
-    stty "$old_stty" </dev/tty 2>/dev/null
+# ---------- macOS appearance ----------
+# Echoes "Dark" or "Light". The global AppleInterfaceStyle key only exists in
+# dark mode; its absence means light.
+macos_style() {
+    if defaults read -g AppleInterfaceStyle 2>/dev/null | grep -qi dark; then
+        echo Dark
+    else
+        echo Light
+    fi
+}
 
-    # Response looks like: ...]11;rgb:rrrr/gggg/bbbb  (2 or 4 hex digits per channel)
-    [[ "$response" =~ rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+) ]] || return 1
-    local r=$((16#${BASH_REMATCH[1]:0:2}))
-    local g=$((16#${BASH_REMATCH[2]:0:2}))
-    local b=$((16#${BASH_REMATCH[3]:0:2}))
-    # Perceived luminance (0–255); below 128 means a dark background.
-    local lum=$(( (r*299 + g*587 + b*114) / 1000 ))
-    [[ $lum -lt 128 ]]
+# Emit the tint matching a given appearance to the terminal (Ghostty).
+apply_tint() {
+    local color
+    if [[ "$1" == Dark ]]; then
+        color="${DARK_COLORS[$index]}"
+    else
+        color="${LIGHT_COLORS[$index]}"
+    fi
+    printf '\e]11;%s\a' "$color" >/dev/tty 2>/dev/null
 }
 
 target=$(parse_target "$@")
@@ -148,25 +173,52 @@ if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]]
     exec "$REAL" "${ARGS[@]}"
 fi
 
-# Don't apply a light tint when a dark terminal theme is active.
-if terminal_bg_is_dark; then
-    exec "$REAL" "${ARGS[@]}"
-fi
-
 # Deterministic index based on user@host
 hash=$(printf "%s" "$target" | cksum | cut -d' ' -f1)
 index=$(( hash % NUM_COLORS ))
-bg_color="${LIGHT_COLORS[$index]}"
 
-# ---------- Trap to restore background ----------
+# ---------- Live appearance monitor (background) ----------
+# Keep the tint in sync with the macOS appearance. Reacts instantly to SIGUSR1
+# ("re-check now"); polls every SSH_TINT_POLL seconds as a fallback (0 = never).
+# `ssh-tint-flip` sends SIGUSR1 to every registered monitor at once.
+POLL=${SSH_TINT_POLL:-15}
+TINT_DIR="/tmp/ssh-tint-${UID}"
+PIDFILE=""
+
+resync() { local now; now=$(macos_style); [[ "$now" != "$last" ]] && { apply_tint "$now"; last="$now"; }; }
+
+monitor_appearance() {
+    local last="$1"
+    trap resync USR1                 # instant flip on demand
+    while :; do
+        if [[ "${POLL:-0}" =~ ^[0-9]+$ && "$POLL" -gt 0 ]]; then
+            sleep "$POLL" & wait $!   # SIGUSR1 interrupts the sleep
+        else
+            sleep 2147483647 & wait $!   # idle; only SIGUSR1 wakes us
+        fi
+        resync
+    done
+}
+
+MON_PID=""
 restore_bg() {
+    [[ -n "$MON_PID" ]] && kill "$MON_PID" 2>/dev/null
+    [[ -n "$PIDFILE" ]] && rm -f "$PIDFILE" 2>/dev/null
     printf '\e]111\a' >/dev/tty 2>/dev/null  # reset background to default
     trap - EXIT INT TERM
 }
 trap restore_bg EXIT INT TERM
 
-# Apply the chosen light background
-printf '\e]11;%s\a' "$bg_color" >/dev/tty 2>/dev/null
+# Apply the initial tint for the current appearance, then start the monitor and
+# register its PID so ssh-tint-flip can find it.
+style=$(macos_style)
+apply_tint "$style"
+monitor_appearance "$style" &
+MON_PID=$!
+if mkdir -p "$TINT_DIR" 2>/dev/null; then
+    PIDFILE="$TINT_DIR/$MON_PID"
+    echo "$MON_PID" > "$PIDFILE" 2>/dev/null || PIDFILE=""
+fi
 
 # Run the real backend
 "$REAL" "${ARGS[@]}"
