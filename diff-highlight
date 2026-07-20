@@ -1,0 +1,19 @@
+#!/bin/sh
+# Cross-platform wrapper around git's contrib diff-highlight script.
+# The script ships with git but isn't on PATH (and isn't +x), and its
+# location differs per OS, so locate it and run it through perl.
+# Used by tig (set diff-highlight = true) for intra-line diff highlighting.
+for p in \
+	"$(git --exec-path)/../../share/git-core/contrib/diff-highlight/diff-highlight" \
+	/usr/share/doc/git/contrib/diff-highlight/diff-highlight \
+	/usr/share/git-core/contrib/diff-highlight/diff-highlight \
+	/opt/homebrew/opt/git/share/git-core/contrib/diff-highlight/diff-highlight \
+	/usr/local/opt/git/share/git-core/contrib/diff-highlight/diff-highlight \
+	/usr/local/share/git-core/contrib/diff-highlight/diff-highlight
+do
+	if [ -f "$p" ]; then
+		exec perl "$p" "$@"
+	fi
+done
+# Not found: pass diffs through unchanged so tig still works.
+exec cat
