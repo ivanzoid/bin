@@ -151,7 +151,22 @@ macos_style() {
     fi
 }
 
-# Emit the tint matching a given appearance to the terminal (Ghostty).
+# Mirror the appearance into the remote tmux status bar (the folder-colored
+# strip in ~/.tmux.conf). mosh can't carry the terminal-theme protocol, so push
+# the light/dark bit over a quick ssh and refresh the strip. Best-effort and
+# backgrounded: uses the real ssh (never this wrapper), never blocks or breaks
+# the tint, and no-ops silently if the remote has no tmux server. Rare (only on
+# appearance flips + connect), and ControlMaster in ~/.ssh/config makes it cheap.
+push_remote_appearance() {
+    [[ -n "$target" && "$target" != "@" ]] || return 0
+    local mode; [[ "$1" == Dark ]] && mode=dark || mode=light
+    /usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=3 "$target" \
+        "tmux set -g @appearance $mode 2>/dev/null && tmux run-shell -b '~/.tmux/refresh-appearance.sh' 2>/dev/null" \
+        >/dev/null 2>&1 &
+}
+
+# Emit the tint matching a given appearance to the terminal (Ghostty), and
+# mirror it into the remote tmux strip.
 apply_tint() {
     local color
     if [[ "$1" == Dark ]]; then
@@ -160,6 +175,7 @@ apply_tint() {
         color="${LIGHT_COLORS[$index]}"
     fi
     printf '\e]11;%s\a' "$color" >/dev/tty 2>/dev/null
+    push_remote_appearance "$1"
 }
 
 target=$(parse_target "$@")
