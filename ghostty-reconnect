@@ -26,23 +26,31 @@ set -u
 # ============================================================================
 #  HOST TABLE  —  edit here to add or change hosts.
 #
-#  For each bare host label as it appears in the window title (e.g. "ai"):
-#    connect  = the address mosh/ssh actually dials. Prefer a raw IP: it does
-#               zero name lookup, avoiding the slow .local path on macOS (*.local
-#               is routed to mDNS, which stalls ~5s on the dead macvlan .162
-#               record, plus mosh's --family/fake-proxy dance for .local names).
-#    identity = the name the ssh/mosh tint wrapper hashes for the per-host
-#               background color. Keep it stable so the color never changes,
-#               even if `connect` switches between a name and an IP.
+#  Maps a bare host label from the window title (e.g. "ai") to its canonical
+#  name (the identity). The IP is deliberately NOT here — it lives solely in
+#  /etc/hosts (single source of truth), read directly below so we dial a raw IP
+#  with zero name lookup (macOS routes *.local through mDNS, which stalls ~5s on
+#  the dead macvlan .162 record). Unlisted hosts use the bare label as-is.
 #
-#  Unlisted hosts default to connect == identity == the bare host label.
-#  The "ivan@" login is added below, so list bare hosts/IPs here.
+#  To point a host at a new address, edit ONE line in /etc/hosts, e.g.:
+#      10.0.0.5   ai.local
+#  The "ivan@" login is added below.
 # ============================================================================
+hosts_ipv4() {   # IPv4 for a name from /etc/hosts only — a file read, no resolver/mDNS
+    awk -v h="$1" '
+        /^[[:space:]]*#/ { next }
+        $1 ~ /:/         { next }          # skip IPv6 rows
+        { for (i = 2; i <= NF; i++) if ($i == h) { print $1; exit } }
+    ' /etc/hosts 2>/dev/null
+}
+
 resolve_host() {   # sets globals: connect, identity
-    case "$1" in
-        ai) connect="10.0.0.5"; identity="ai.local" ;;
-        *)  connect="$1";       identity="$1" ;;
+    case "$1" in           # bare label -> canonical name (tint hash + /etc/hosts key)
+        ai) identity="ai.local" ;;
+        *)  identity="$1" ;;
     esac
+    connect="$(hosts_ipv4 "$identity")"          # pinned IP (fast, no mDNS) ...
+    [[ -n "$connect" ]] || connect="$identity"   # ... else dial the name
 }
 
 # Drop to a fresh local login shell (window stays open). Never returns.
