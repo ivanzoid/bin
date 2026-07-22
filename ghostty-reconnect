@@ -23,16 +23,25 @@
 
 set -u
 
-# Map the title's bare host to "connect_target|tint_identity". ai dials the raw
-# IP to skip the slow ai.local lookup (macOS forces .local through mDNS, which
-# times out ~5s on the dead macvlan .162 record — /etc/hosts can't override it).
-# The identity stays ivan@ai.local so the tint wrapper's per-host background
-# color is unchanged (it hashes the identity, exported as SSH_TINT_IDENTITY).
-# Unknown hosts: connect == identity == ivan@<host>.
-host_target() {
+# ============================================================================
+#  HOST TABLE  —  edit here to add or change hosts.
+#
+#  For each bare host label as it appears in the window title (e.g. "ai"):
+#    connect  = the address mosh/ssh actually dials. Prefer a raw IP: it does
+#               zero name lookup, avoiding the slow .local path on macOS (*.local
+#               is routed to mDNS, which stalls ~5s on the dead macvlan .162
+#               record, plus mosh's --family/fake-proxy dance for .local names).
+#    identity = the name the ssh/mosh tint wrapper hashes for the per-host
+#               background color. Keep it stable so the color never changes,
+#               even if `connect` switches between a name and an IP.
+#
+#  Unlisted hosts default to connect == identity == the bare host label.
+#  The "ivan@" login is added below, so list bare hosts/IPs here.
+# ============================================================================
+resolve_host() {   # sets globals: connect, identity
     case "$1" in
-        ai) printf 'ivan@10.0.0.5|ivan@ai.local' ;;
-        *)  printf 'ivan@%s|ivan@%s' "$1" "$1" ;;
+        ai) connect="10.0.0.5"; identity="ai.local" ;;
+        *)  connect="$1";       identity="$1" ;;
     esac
 }
 
@@ -62,11 +71,13 @@ rm -f "$req" 2>/dev/null
 # (~/bin) and the real binaries (Homebrew) findable.
 export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-# Split "connect_target|tint_identity"; export the identity so the ssh/mosh tint
-# wrapper keeps the per-host background color stable even though we dial a raw IP.
-_ht="$(host_target "$host")"
-target="${_ht%%|*}"
-export SSH_TINT_IDENTITY="${_ht#*|}"
+# Resolve the host to a dial address + a stable tint identity (see HOST TABLE).
+# Dial the address; export the identity so the ssh/mosh tint wrapper keeps the
+# per-host background color stable even when we dial a raw IP.
+connect="" identity=""
+resolve_host "$host"
+target="ivan@$connect"
+export SSH_TINT_IDENTITY="ivan@$identity"
 
 # Remote command: best-effort cd into the dir, then exec a fresh, auto-named
 # tmux session. session-name.sh lives on the remote. $HOME is left unexpanded
