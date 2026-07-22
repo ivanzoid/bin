@@ -24,11 +24,12 @@
 set -u
 
 # How the title's bare host maps to a connect target. Unknown hosts fall back to
-# ivan@<host>. ai connects by IP to skip flaky ai.local mDNS (the macvlan .162
-# shim + asymmetric routing hangs mosh; 10.0.0.5 is the known-good address).
+# ivan@<host>. Keep ai on ai.local (not the raw IP): the ssh/mosh tint wrapper
+# hashes this string for the per-host background tint, and push_remote_appearance
+# reuses the ~/.ssh/config ControlMaster keyed to ai.local — a raw IP breaks both.
 host_target() {
     case "$1" in
-        ai) printf 'ivan@10.0.0.5' ;;
+        ai) printf 'ivan@ai.local' ;;
         *)  printf 'ivan@%s' "$1" ;;
     esac
 }
