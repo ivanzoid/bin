@@ -141,14 +141,24 @@ parse_target() {
 }
 
 # ---------- macOS appearance ----------
+# Cached light/dark bit so we skip a ~30-80ms `defaults` spawn on every connect
+# (it's on the new-tab/window critical path). Maintained by ssh-tint-flip, which
+# Hammerspoon runs on every macOS appearance change, so it stays current; on a
+# miss we seed/repair it here. Keep the path in sync with ssh-tint-flip.
+APPEARANCE_CACHE="$HOME/.cache/macos-appearance"
+
 # Echoes "Dark" or "Light". The global AppleInterfaceStyle key only exists in
 # dark mode; its absence means light.
 macos_style() {
-    if defaults read -g AppleInterfaceStyle 2>/dev/null | grep -qi dark; then
-        echo Dark
-    else
-        echo Light
+    local cached
+    if [[ -r "$APPEARANCE_CACHE" ]] && IFS= read -r cached < "$APPEARANCE_CACHE" && [[ "$cached" == Dark || "$cached" == Light ]]; then
+        printf '%s\n' "$cached"
+        return
     fi
+    local s=Light
+    defaults read -g AppleInterfaceStyle 2>/dev/null | grep -qi dark && s=Dark
+    mkdir -p "${APPEARANCE_CACHE%/*}" 2>/dev/null && printf '%s\n' "$s" > "$APPEARANCE_CACHE" 2>/dev/null
+    printf '%s\n' "$s"
 }
 
 # Mirror the appearance into the remote tmux status bar (the folder-colored

@@ -4,6 +4,16 @@
 # Bind to a hotkey, or call from an appearance-change hook, to flip every open
 # session at once. Stale PID files are cleaned up as we go.
 
+# Refresh the cached macOS appearance BEFORE poking the monitors, so their
+# resync — and any brand-new connection's initial tint — reads the new value.
+# macOS only. Keep this path/logic in sync with the `ssh` wrapper's macos_style.
+if [[ "$(uname -s)" == Darwin ]]; then
+    APPEARANCE_CACHE="$HOME/.cache/macos-appearance"
+    _style=Light
+    defaults read -g AppleInterfaceStyle 2>/dev/null | grep -qi dark && _style=Dark
+    mkdir -p "${APPEARANCE_CACHE%/*}" 2>/dev/null && printf '%s\n' "$_style" > "$APPEARANCE_CACHE" 2>/dev/null
+fi
+
 TINT_DIR="/tmp/ssh-tint-${UID}"
 shopt -s nullglob
 

@@ -1,0 +1,84 @@
+#!/bin/bash
+# Ghostty Cmd+T / Cmd+N remote reconnect helper.
+#
+# Reads a small request file (staged by ~/.hammerspoon/ghostty-remote-tabs.lua
+# right before it opens a native new tab/window) describing which host + remote
+# directory to reconnect to, then launches mosh/ssh into a fresh tmux session in
+# that directory. The early hook at the top of ~/.zprofile execs this *before*
+# any heavy shell init runs, so a new Ghostty surface connects straight out
+# without paying for a full local login shell (the old approach spun one up just
+# to type a command into it, then polled for its prompt).
+#
+# When the remote session ends (or the connect fails, e.g. mosh missing) we fall
+# through to a normal local login shell, so the window stays open — same as the
+# old "type a command into the shell" behaviour.
+#
+# Request file format (one field per line):
+#   <epoch>       unix time the request was written (freshness gate is in ~/.zprofile)
+#   <transport>   "mosh" | "ssh"
+#   <host>        bare host label from the window title, e.g. "ai"
+#   <dir>         remote dir (may start with ~), or empty for "no cd"
+#
+# Usage: ghostty-reconnect <request-file>
+
+set -u
+
+# How the title's bare host maps to a connect target. Unknown hosts fall back to
+# ivan@<host>. ai connects by IP to skip flaky ai.local mDNS (the macvlan .162
+# shim + asymmetric routing hangs mosh; 10.0.0.5 is the known-good address).
+host_target() {
+    case "$1" in
+        ai) printf 'ivan@10.0.0.5' ;;
+        *)  printf 'ivan@%s' "$1" ;;
+    esac
+}
+
+# Drop to a fresh local login shell (window stays open). Never returns.
+fallback() {
+    if [[ -n "${GHOSTTY_RECONNECT_DEBUG:-}" ]]; then echo 'argv: [fallback login shell]'; exit 0; fi
+    exec "${SHELL:-/bin/zsh}" -li
+}
+
+# Run the backend; when it exits, fall through to a local login shell.
+launch() {
+    if [[ -n "${GHOSTTY_RECONNECT_DEBUG:-}" ]]; then printf 'argv:'; printf ' [%s]' "$@"; printf '\n'; exit 0; fi
+    "$@"
+    exec "${SHELL:-/bin/zsh}" -li
+}
+
+req="${1:-}"
+[[ -n "$req" && -r "$req" ]] || fallback
+
+# Read the four fields, then remove the request so no later shell reuses it.
+transport="" host="" dir=""
+{ read -r _epoch; read -r transport; read -r host; read -r dir; } < "$req"
+rm -f "$req" 2>/dev/null
+[[ -n "$host" ]] || fallback
+
+# .zprofile's PATH setup hasn't run yet, so make the mosh/ssh tint wrapper
+# (~/bin) and the real binaries (Homebrew) findable.
+export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+target="$(host_target "$host")"
+
+# Remote command: best-effort cd into the dir, then exec a fresh, auto-named
+# tmux session. session-name.sh lives on the remote. $HOME is left unexpanded
+# here so the *remote* shell expands it (a quoted "~" would not expand).
+remote_cmd='exec tmux new-session -s "$($HOME/.tmux/session-name.sh)"'
+if [[ -n "$dir" ]]; then
+    case "$dir" in
+        "~"|"~/"*) rdir="\$HOME${dir#\~}" ;;   # ~/ha -> $HOME/ha (literal for remote)
+        *)         rdir="$dir" ;;
+    esac
+    remote_cmd="cd \"$rdir\" 2>/dev/null; $remote_cmd"
+fi
+
+if [[ "$transport" == "ssh" ]]; then
+    # ssh runs the command via the remote login shell; -t forces a PTY for tmux.
+    launch ssh -t "$target" "$remote_cmd"
+else
+    # mosh execs the command directly (no remote shell wrapper), so invoke a
+    # non-interactive login zsh: it picks up PATH, skips the tmux chooser, then
+    # execs tmux. "--" before the host keeps mosh's parser off the -lc flags.
+    launch mosh -- "$target" zsh -lc "$remote_cmd"
+fi
