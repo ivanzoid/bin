@@ -190,8 +190,11 @@ if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]]
     exec "$REAL" "${ARGS[@]}"
 fi
 
-# Deterministic index based on user@host
-hash=$(printf "%s" "$target" | cksum | cut -d' ' -f1)
+# Deterministic index based on user@host. Hash the tint identity, not the literal
+# target: ghostty-reconnect dials a fast raw IP for some hosts but exports the
+# stable identity (e.g. ivan@ai.local) via SSH_TINT_IDENTITY so the per-host
+# color doesn't change with the dialed address. Falls back to the target.
+hash=$(printf "%s" "${SSH_TINT_IDENTITY:-$target}" | cksum | cut -d' ' -f1)
 index=$(( hash % NUM_COLORS ))
 
 # ---------- Live appearance monitor (background) ----------

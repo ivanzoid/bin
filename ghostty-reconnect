@@ -23,14 +23,16 @@
 
 set -u
 
-# How the title's bare host maps to a connect target. Unknown hosts fall back to
-# ivan@<host>. Keep ai on ai.local (not the raw IP): the ssh/mosh tint wrapper
-# hashes this string for the per-host background tint, and push_remote_appearance
-# reuses the ~/.ssh/config ControlMaster keyed to ai.local — a raw IP breaks both.
+# Map the title's bare host to "connect_target|tint_identity". ai dials the raw
+# IP to skip the slow ai.local lookup (macOS forces .local through mDNS, which
+# times out ~5s on the dead macvlan .162 record — /etc/hosts can't override it).
+# The identity stays ivan@ai.local so the tint wrapper's per-host background
+# color is unchanged (it hashes the identity, exported as SSH_TINT_IDENTITY).
+# Unknown hosts: connect == identity == ivan@<host>.
 host_target() {
     case "$1" in
-        ai) printf 'ivan@ai.local' ;;
-        *)  printf 'ivan@%s' "$1" ;;
+        ai) printf 'ivan@10.0.0.5|ivan@ai.local' ;;
+        *)  printf 'ivan@%s|ivan@%s' "$1" "$1" ;;
     esac
 }
 
@@ -60,7 +62,11 @@ rm -f "$req" 2>/dev/null
 # (~/bin) and the real binaries (Homebrew) findable.
 export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
-target="$(host_target "$host")"
+# Split "connect_target|tint_identity"; export the identity so the ssh/mosh tint
+# wrapper keeps the per-host background color stable even though we dial a raw IP.
+_ht="$(host_target "$host")"
+target="${_ht%%|*}"
+export SSH_TINT_IDENTITY="${_ht#*|}"
 
 # Remote command: best-effort cd into the dir, then exec a fresh, auto-named
 # tmux session. session-name.sh lives on the remote. $HOME is left unexpanded
