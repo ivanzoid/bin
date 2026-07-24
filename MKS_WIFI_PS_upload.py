@@ -6,14 +6,79 @@
 # encoding fix: @Goodsmileduck
 # version: 0.4.0
 #
-# Setup (macOS, for use as an OrcaSlicer post-processing script):
-#   OrcaSlicer is a GUI app, so it runs this via /usr/bin/python3 (the shebang
-#   resolves there, not to your shell's python3). Install the deps for it:
-#       python3 -m pip install requests regex Pillow
-#   Verify against the interpreter OrcaSlicer actually uses:
-#       /usr/bin/python3 -c "import requests, regex, PIL; print('ok')"
+# Portable setup for use as an OrcaSlicer post-processing script:
+#   OrcaSlicer is a GUI app, so it runs this via the system python3 (the shebang
+#   resolves there, not to your shell's python3). That interpreter usually lacks
+#   our deps, and on macOS ships a broken Tk 8.5 that draws a blank window.
+#   To stay portable across machines we self-bootstrap: on first run we build a
+#   private venv from a python with a modern Tk (>= 8.6), install the deps into
+#   it, and re-exec ourselves under that venv. Later runs just re-exec (fast).
+#   OrcaSlicer's config stays identical on every machine -- no interpreter path.
+#
+#   Prerequisite the script CAN'T automate: a python with Tk >= 8.6 must exist.
+#     macOS:  brew install python-tk
+#     Linux:  the distro python3 usually already qualifies (needs python3-venv)
+#   Override the venv location with the MKS_WIFI_VENV env var.
 
-import sys, os, requests, io, time
+# --- self-bootstrapping venv (stdlib only above the re-exec) ---------------
+import os, sys, subprocess
+
+_VENV_DIR = os.environ.get("MKS_WIFI_VENV", os.path.expanduser("~/.venvs/mks-wifi-upload"))
+_REQUIREMENTS = ["requests", "regex", "Pillow"]
+_BOOTSTRAPPED_ENV = "MKS_WIFI_BOOTSTRAPPED"
+
+def _venv_python(venv_dir):
+    sub = "Scripts" if os.name == "nt" else "bin"
+    exe = "python.exe" if os.name == "nt" else "python3"
+    return os.path.join(venv_dir, sub, exe)
+
+def _tk_at_least_86(python_exe):
+    try:
+        out = subprocess.check_output(
+            [python_exe, "-c", "import tkinter as t; print(t.TkVersion)"],
+            stderr=subprocess.DEVNULL, text=True).strip()
+        return tuple(int(n) for n in out.split(".")) >= (8, 6)
+    except Exception:
+        return False
+
+def _find_base_python():
+    # Prefer an interpreter whose Tk is modern; fall back to whatever runs us.
+    candidates = [
+        "/opt/homebrew/bin/python3",   # Apple Silicon Homebrew
+        "/usr/local/bin/python3",      # Intel Homebrew
+        "/Library/Frameworks/Python.framework/Versions/Current/bin/python3",  # python.org
+        sys.executable,
+    ]
+    fallback = None
+    for c in candidates:
+        if c and os.path.exists(c):
+            if _tk_at_least_86(c):
+                return c
+            fallback = fallback or c
+    return fallback or sys.executable
+
+def _bootstrap():
+    if os.environ.get(_BOOTSTRAPPED_ENV):
+        return  # already re-exec'd into the venv
+    venv_py = _venv_python(_VENV_DIR)
+    if not os.path.exists(venv_py):
+        subprocess.check_call([_find_base_python(), "-m", "venv", _VENV_DIR])
+    try:  # install deps only if any are missing
+        subprocess.check_call([venv_py, "-c", "import requests, regex, PIL"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        subprocess.check_call([venv_py, "-m", "pip", "install", *_REQUIREMENTS])
+    os.environ[_BOOTSTRAPPED_ENV] = "1"
+    # Re-exec unless we're already running inside the venv. Use sys.prefix, not
+    # the executable path: a venv's python is a symlink to the base python, so
+    # comparing realpath(executable) would wrongly think we're already in it.
+    if os.path.realpath(sys.prefix) != os.path.realpath(_VENV_DIR):
+        os.execve(venv_py, [venv_py, os.path.realpath(__file__), *sys.argv[1:]], os.environ)
+
+_bootstrap()
+# --- end self-bootstrapping venv -------------------------------------------
+
+import requests, io, time
 import socket as pysock
 
 import base64
