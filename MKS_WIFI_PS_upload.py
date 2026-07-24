@@ -1,4 +1,4 @@
-#! /usr/bin/env python
+#! /usr/bin/env python3
 #  -*- coding: utf-8 -*-
 # author: Victor Shapovalov (@ArtificalSUN), 2022
 # PrusaSlicer Thumbnail to TFT Thumbnail converter: @SH1NZ33
