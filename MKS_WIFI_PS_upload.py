@@ -5,6 +5,13 @@
 # Fix for PrusaSlicer 2.4 and newer: @WashingtonJunior
 # encoding fix: @Goodsmileduck
 # version: 0.4.0
+#
+# Setup (macOS, for use as an OrcaSlicer post-processing script):
+#   OrcaSlicer is a GUI app, so it runs this via /usr/bin/python3 (the shebang
+#   resolves there, not to your shell's python3). Install the deps for it:
+#       python3 -m pip install requests regex Pillow
+#   Verify against the interpreter OrcaSlicer actually uses:
+#       /usr/bin/python3 -c "import requests, regex, PIL; print('ok')"
 
 import sys, os, requests, io, time
 import socket as pysock
@@ -13,7 +20,7 @@ import base64
 import regex as re # pip install regex
 from os.path import exists
 from io import BytesIO
-from PIL import Image # pip install Image
+from PIL import Image # pip install Pillow
 
 def generate_tft(img):
     width, height = img.size
@@ -245,11 +252,22 @@ def startJob(ip_addr, sd_name):
 
 def startTransfer():
     global ip_addr, localfile, sd_name
+    root.update() # force initial paint (macOS aqua won't draw the window before the blocking work below)
     convertPrusaThumb2TFTThumb(localfile) # converting Prusa Thumbs into TFT Thumbs
     with open(localfile, 'r', encoding="utf-8") as f:
         gcode = f.read()
     body_buffer = BufferReader(gcode.encode(), upload_progress)
-    r = requests.post("http://{:s}/upload?X-Filename={:s}".format(ip_addr, sd_name), data=body_buffer, headers={'Content-Type': 'application/octet-stream', 'Connection' : 'keep-alive'})
+    # timeout=(connect, read): fail fast if the printer is unreachable or stops
+    # responding, so OrcaSlicer reports an error instead of hanging forever.
+    try:
+        r = requests.post("http://{:s}/upload?X-Filename={:s}".format(ip_addr, sd_name), data=body_buffer, headers={'Content-Type': 'application/octet-stream', 'Connection' : 'keep-alive'}, timeout=(10, 60))
+    except requests.exceptions.RequestException as e:
+        top.lbl_UploadStatus['text'] = "Upload failed: {0}".format(e)
+        root.update()
+        print("Upload to {0} failed: {1}".format(ip_addr, e), file=sys.stderr)
+        time.sleep(3)
+        root.destroy()
+        sys.exit(1)
     top.lbl_UploadStatus['text'] = "Done!"
     root.update()
     if mode == "always":
