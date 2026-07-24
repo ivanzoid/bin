@@ -1,0 +1,6 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# macOS Finder cruft (this repo is also checked out on the mac)
+.DS_Store
