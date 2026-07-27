@@ -9,9 +9,10 @@
 # without paying for a full local login shell (the old approach spun one up just
 # to type a command into it, then polled for its prompt).
 #
-# When the remote session ends (or the connect fails, e.g. mosh missing) we fall
-# through to a normal local login shell, so the window stays open — same as the
-# old "type a command into the shell" behaviour.
+# When the remote session ends cleanly we exit too, so Ghostty closes the
+# tab/window on a single Ctrl+D. Only a failed connect (e.g. mosh missing, host
+# down) falls through to a local login shell, which keeps the error readable
+# instead of the surface vanishing.
 #
 # Request file format (one field per line):
 #   <epoch>       unix time the request was written (freshness gate is in ~/.zprofile)
@@ -57,10 +58,21 @@ fallback() {
     exec "${SHELL:-/bin/zsh}" -li
 }
 
-# Run the backend; when it exits, fall through to a local login shell.
+# Run the backend. On a clean exit (status 0) end this process too, so Ghostty
+# closes the tab/window on a single Ctrl+D instead of dropping you into a local
+# shell you have to exit a second time. Only a *failed* run falls through to a
+# login shell, which is what the fallback is really for: a connect error (mosh
+# missing, host down) stays readable instead of the surface vanishing.
+#
+# Caveat for ssh: its status is the *remote* command's, so a remote session that
+# ends nonzero also leaves you in a local shell.
 launch() {
     if [[ -n "${GHOSTTY_RECONNECT_DEBUG:-}" ]]; then printf 'argv:'; printf ' [%s]' "$@"; printf '\n'; exit 0; fi
-    "$@"
+    "$@" && exit 0
+    # The identity we exported below belongs to *this* connect only. Drop it so a
+    # later ssh/mosh typed into the fallback shell hashes its own target instead
+    # of inheriting this host's tint color.
+    unset SSH_TINT_IDENTITY
     exec "${SHELL:-/bin/zsh}" -li
 }
 
