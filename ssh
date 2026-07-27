@@ -20,42 +20,18 @@ self="$(basename "$0")"   # "ssh" or "mosh"
 
 # ---------- HARD‑CODED LIGHT COLORS (generated once) ----------
 
+# Order is load-bearing: the index is cksum(user@host) % 8, so moving a line
+# reassigns every host that hashes to it. Keep DARK_COLORS in the same order.
 LIGHT_COLORS=(
     "rgb:F6/F2/E6"  # Softer Warm Yellow
     "rgb:EF/F6/F2"  # Lighter Mint
     "rgb:F7/F2/F2"  # Softer Pink
     "rgb:F2/F7/F9"  # Softer Cyan
-    "rgb:F3/F8/F3"  # Softer Green
     "rgb:F3/F3/F8"  # Softer Blue
+    "rgb:F3/F8/F3"  # Softer Green
     "rgb:F6/F2/F8"  # Softer Purple
     "rgb:F8/F3/EE"  # Softer Peach
 )
-
-#LIGHT_COLORS=(
-#    "rgb:FF/F8/DC"  # Lighter Warm Yellow
-#    "rgb:EC/FF/F8"  # Lighter Mint
-#    "rgb:FF/EC/EC"  # Lighter Pink
-#    "rgb:EC/FB/FF"  # Lighter Cyan
-#    "rgb:F0/FF/F0"  # Lighter Green
-#    "rgb:F0/F0/FF"  # Lighter Blue
-#    "rgb:FA/F0/FF"  # Lighter Purple
-#    "rgb:FF/F5/ED"  # Lighter Peach
-#)
-
-#LIGHT_COLORS=(
-#	"rgb:F6/EE/EE"
-#	"rgb:F6/F2/EE"
-#	"rgb:F6/F6/EE"
-#	"rgb:F2/F6/EE"
-#	"rgb:EE/F6/EE"
-#	"rgb:EE/F6/F2"
-#	"rgb:EE/F6/F6"
-#	"rgb:EE/F2/F6"
-#	"rgb:EE/EE/F6"
-#	"rgb:F2/EE/F6"
-#	"rgb:F6/EE/F6"
-#	"rgb:F6/EE/F2"
-#)
 
 # Dark-mode counterparts, index-aligned with LIGHT_COLORS (same hue families,
 # very dark so the tint is a subtle cast over a near-black background). Tweak
@@ -65,8 +41,8 @@ DARK_COLORS=(
     "rgb:0E/1C/16"  # Mint
     "rgb:1E/12/14"  # Pink
     "rgb:0E/18/1E"  # Cyan
-    "rgb:10/1C/10"  # Green
     "rgb:10/10/20"  # Blue
+    "rgb:10/1C/10"  # Green
     "rgb:1A/10/20"  # Purple
     "rgb:20/14/0E"  # Peach
 )
@@ -192,9 +168,14 @@ fi
 
 # Deterministic index based on user@host. Hash the tint identity, not the literal
 # target: ghostty-reconnect dials a fast raw IP for some hosts but exports the
-# stable identity (e.g. ivan@ai.local) via SSH_TINT_IDENTITY so the per-host
-# color doesn't change with the dialed address. Falls back to the target.
-hash=$(printf "%s" "${SSH_TINT_IDENTITY:-$target}" | cksum | cut -d' ' -f1)
+# stable identity (e.g. ivan@ai) via SSH_TINT_IDENTITY so the per-host color
+# doesn't change with the dialed address. Falls back to the target.
+#
+# A trailing ".local" is dropped first: hosts are named bare now (see the host
+# notes in ghostty-reconnect), so this only keeps a typed `ssh ai.local` on the
+# same color as `ssh ai` instead of hashing it as a separate box.
+identity="${SSH_TINT_IDENTITY:-$target}"
+hash=$(printf "%s" "${identity%.local}" | cksum | cut -d' ' -f1)
 index=$(( hash % NUM_COLORS ))
 
 # ---------- Live appearance monitor (background) ----------
