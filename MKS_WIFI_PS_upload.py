@@ -19,6 +19,14 @@
 #     macOS:  brew install python-tk
 #     Linux:  the distro python3 usually already qualifies (needs python3-venv)
 #   Override the venv location with the MKS_WIFI_VENV env var.
+#
+#   macOS Local Network privacy: OrcaSlicer is never granted permission to reach
+#   LAN devices for a spawned CLI helper (the prompt never fires, and the app
+#   never lands in Privacy > Local Network), so the upload fails with "No route
+#   to host". A plain fork/detach does NOT help -- macOS attributes the
+#   permission to the "responsible process" up the spawn chain. So on macOS we
+#   first re-launch through launchd (launchctl asuser), which disclaims that
+#   responsibility; the disclaimed process is allowed to reach the LAN.
 
 # --- self-bootstrapping venv (stdlib only above the re-exec) ---------------
 import os, sys, subprocess
@@ -26,6 +34,25 @@ import os, sys, subprocess
 _VENV_DIR = os.environ.get("MKS_WIFI_VENV", os.path.expanduser("~/.venvs/mks-wifi-upload"))
 _REQUIREMENTS = ["requests", "regex", "Pillow"]
 _BOOTSTRAPPED_ENV = "MKS_WIFI_BOOTSTRAPPED"
+_DISCLAIM_ARG = "--mks-disclaimed"
+_DISCLAIMED_ENV = "MKS_WIFI_DISCLAIMED"
+
+def _disclaim_from_parent():
+    # macOS only: re-launch via launchd so we're no longer attributed to the app
+    # that spawned us (OrcaSlicer) for Local Network privacy. See header note.
+    if sys.platform != "darwin":
+        return
+    if os.environ.get(_DISCLAIMED_ENV):
+        return  # env flag survives the later venv re-exec, so we only do this once
+    if _DISCLAIM_ARG in sys.argv:
+        # We're the launchd-relaunched copy: drop the sentinel (so argv[1] is
+        # still the gcode path) and record it in env for the venv re-exec.
+        sys.argv.remove(_DISCLAIM_ARG)
+        os.environ[_DISCLAIMED_ENV] = "1"
+        return
+    # launchctl asuser does not forward env, so carry the state in argv.
+    os.execv("/bin/launchctl", ["launchctl", "asuser", str(os.getuid()),
+             sys.executable, os.path.realpath(__file__), _DISCLAIM_ARG, *sys.argv[1:]])
 
 def _venv_python(venv_dir):
     sub = "Scripts" if os.name == "nt" else "bin"
@@ -75,6 +102,7 @@ def _bootstrap():
     if os.path.realpath(sys.prefix) != os.path.realpath(_VENV_DIR):
         os.execve(venv_py, [venv_py, os.path.realpath(__file__), *sys.argv[1:]], os.environ)
 
+_disclaim_from_parent()  # macOS: escape OrcaSlicer's Local Network restriction
 _bootstrap()
 # --- end self-bootstrapping venv -------------------------------------------
 
