@@ -31,6 +31,17 @@
 # --- self-bootstrapping venv (stdlib only above the re-exec) ---------------
 import os, sys, subprocess
 
+def _dbg(msg):
+    # Dormant unless the flag file exists: `touch ~/.mks_wifi_debug` to enable,
+    # then read ~/mks_wifi_debug.log. Used to trace the launchd disclaim path.
+    try:
+        if not os.path.exists(os.path.expanduser("~/.mks_wifi_debug")):
+            return
+        with open(os.path.expanduser("~/mks_wifi_debug.log"), "a") as f:
+            f.write("[pid=%d ppid=%d uid=%d] %s\n" % (os.getpid(), os.getppid(), os.getuid(), msg))
+    except Exception:
+        pass
+
 _VENV_DIR = os.environ.get("MKS_WIFI_VENV", os.path.expanduser("~/.venvs/mks-wifi-upload"))
 _REQUIREMENTS = ["requests", "regex", "Pillow"]
 _BOOTSTRAPPED_ENV = "MKS_WIFI_BOOTSTRAPPED"
@@ -40,19 +51,29 @@ _DISCLAIMED_ENV = "MKS_WIFI_DISCLAIMED"
 def _disclaim_from_parent():
     # macOS only: re-launch via launchd so we're no longer attributed to the app
     # that spawned us (OrcaSlicer) for Local Network privacy. See header note.
+    _dbg("enter disclaim: platform=%s exe=%s argv=%r disclaimed_env=%r"
+         % (sys.platform, sys.executable, sys.argv, os.environ.get(_DISCLAIMED_ENV)))
     if sys.platform != "darwin":
         return
     if os.environ.get(_DISCLAIMED_ENV):
+        _dbg("already disclaimed (env flag) -> continuing in-process")
         return  # env flag survives the later venv re-exec, so we only do this once
     if _DISCLAIM_ARG in sys.argv:
         # We're the launchd-relaunched copy: drop the sentinel (so argv[1] is
         # still the gcode path) and record it in env for the venv re-exec.
+        _dbg("sentinel present -> this is the disclaimed copy, consuming it")
         sys.argv.remove(_DISCLAIM_ARG)
         os.environ[_DISCLAIMED_ENV] = "1"
         return
     # launchctl asuser does not forward env, so carry the state in argv.
-    os.execv("/bin/launchctl", ["launchctl", "asuser", str(os.getuid()),
-             sys.executable, os.path.realpath(__file__), _DISCLAIM_ARG, *sys.argv[1:]])
+    cmd = ["launchctl", "asuser", str(os.getuid()),
+           sys.executable, os.path.realpath(__file__), _DISCLAIM_ARG, *sys.argv[1:]]
+    _dbg("re-launching via launchctl: %r" % (cmd,))
+    try:
+        os.execv("/bin/launchctl", cmd)
+    except Exception as e:
+        _dbg("execv launchctl FAILED: %r" % (e,))
+        raise
 
 def _venv_python(venv_dir):
     sub = "Scripts" if os.name == "nt" else "bin"
@@ -352,9 +373,12 @@ def startTransfer():
     body_buffer = BufferReader(gcode.encode(), upload_progress)
     # timeout=(connect, read): fail fast if the printer is unreachable or stops
     # responding, so OrcaSlicer reports an error instead of hanging forever.
+    _dbg("uploading to %s (uid=%d) file=%s" % (ip_addr, os.getuid(), sd_name))
     try:
         r = requests.post("http://{:s}/upload?X-Filename={:s}".format(ip_addr, sd_name), data=body_buffer, headers={'Content-Type': 'application/octet-stream', 'Connection' : 'keep-alive'}, timeout=(10, 60))
+        _dbg("upload OK: status=%s" % (getattr(r, "status_code", "?"),))
     except requests.exceptions.RequestException as e:
+        _dbg("upload FAILED: %r" % (e,))
         top.lbl_UploadStatus['text'] = "Upload failed: {0}".format(e)
         root.update()
         print("Upload to {0} failed: {1}".format(ip_addr, e), file=sys.stderr)
