@@ -3,6 +3,8 @@
 #   dps         tree only
 #   dps -m      also show per-container memory + per-group subtotals + grand total
 #               (memory is reported for running containers only)
+#   dps -p      also show published (public) host ports per container
+#               (/tcp is omitted; /udp etc. kept)
 
 set -euo pipefail
 
@@ -51,12 +53,42 @@ case "${1:-}" in
     ' <(docker stats --no-stream --format '{{.Name}}\t{{.MemUsage}}') \
       <(docker ps -a --format "$ps_fmt" | sort)
     ;;
+  -p | --ports)
+    # Append {{.Ports}} to the ps format; from that column keep only published
+    # mappings (those with "->") and report just the public host port, deduping
+    # the IPv4/IPv6 pair docker emits for each. /tcp is dropped; other protocols
+    # (e.g. /udp) are kept. Ports are dimmed gray only when stdout is a terminal.
+    clr=0; if [ -t 1 ]; then clr=1; fi
+    docker ps -a --format "$ps_fmt"'\t{{.Ports}}' | sort \
+      | awk -v color="$clr" -F'\t' '
+        BEGIN { if(color){ g="\033[90m"; r="\033[0m" } }
+        function ports(s,   parts,i,n,m,hp,proto,key,seen,out){
+          n=split(s,parts,", "); out=""
+          for(i=1;i<=n;i++){
+            if(match(parts[i], /[0-9]+->[0-9]+\/[a-z]+/)){
+              m=substr(parts[i], RSTART, RLENGTH)   # e.g. 9070->9000/tcp
+              hp=m; sub(/->.*/,"",hp)               # host (public) port
+              proto=m; sub(/.*\//,"",proto)         # protocol
+              key=(proto=="tcp")?hp:hp"/"proto
+              if(!(key in seen)){ seen[key]=1; out=(out==""?key:out ", " key) }
+            }
+          }
+          return out
+        }
+        $1!=p{print $1;p=$1}
+        {
+          s=($3~/^Up/)?"up ─":"down"
+          pt=ports($4)
+          extra=(pt=="")?"":"  " g pt r
+          print "└─ " s " " $2 extra
+        }'
+    ;;
   "")
     docker ps -a --format "$ps_fmt" | sort \
       | awk -F'\t' '$1!=p{print $1;p=$1} {s=($3~/^Up/)?"up ─":"down"; print "└─ " s " " $2}'
     ;;
   *)
-    echo "usage: dps [-m|--mem]" >&2
+    echo "usage: dps [-m|--mem | -p|--ports]" >&2
     exit 2
     ;;
 esac
