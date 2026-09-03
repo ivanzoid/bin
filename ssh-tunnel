@@ -2,9 +2,10 @@
 # Open an ssh port-forwarding tunnel (ssh -N) from a compact port spec, instead
 # of spelling out one -L per port.
 #
-#   ssh-tunnel ivan@ai -p 8002-8007,8080-8085,9000
-#   ssh-tunnel -d ivan@ai -p 3000,5432          # detach into the background
-#   ssh-tunnel -n ivan@ai -p 8000-8002          # dry run: just print the command
+#   ssh-tunnel ivan@ai -p 8002-8012,8080-8090,9000-9010
+#   ssh-tunnel -s ivan@ai -p 8000-8100       # skip local ports already in use
+#   ssh-tunnel -d ivan@ai -p 3000,5432       # detach into the background
+#   ssh-tunnel -n ivan@ai -p 8000-8002       # dry run: just print the command
 #   ssh-tunnel ivan@ai -p 8080 -- -J bastion -i ~/.ssh/id_ed25519
 #
 # Port spec items, comma-separated:
@@ -14,21 +15,35 @@
 # The remote end is localhost unless -r/--remote-host names another host (that
 # name is resolved on the remote side).
 #
-# ssh gets ExitOnForwardFailure plus keepalives, so a local port that is already
-# taken fails loudly instead of leaving a half-working tunnel. Anything after --
-# is handed to ssh *before* those defaults, so it wins: ssh keeps the first
-# value it sees for an option (e.g. `-- -o ExitOnForwardFailure=no`).
+# Local listeners bind 127.0.0.1 explicitly (-b to change): left implicit, ssh
+# resolves the bind address across both families and noisily fails on [::1] for
+# every port on a host with IPv6 disabled. -b 0.0.0.0 exposes the forwards to
+# the LAN.
+#
+# ssh gets ExitOnForwardFailure plus keepalives, so a port that can't bind fails
+# the tunnel instead of leaving it half working. Because one busy port out of
+# fifty is a miserable way to find that out, the wanted ports are checked
+# against the local listeners first (ss, else lsof) and the clash is reported
+# with the process holding it; -s forwards the rest instead of bailing. That
+# check is advisory -- ExitOnForwardFailure still catches whatever it missed
+# (no ss/lsof, a listener on another address, a race).
+#
+# Anything after -- is handed to ssh *before* the defaults above, so it wins:
+# ssh keeps the first value it sees for an option (e.g. `-- -4`, or
+# `-- -o ExitOnForwardFailure=no`).
 #
 # The real ssh is called directly, bypassing the `ssh` tint wrapper in this
-# directory — a background tunnel has no business recoloring the terminal.
+# directory -- a background tunnel has no business recoloring the terminal.
 
 set -euo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-usage: ssh-tunnel [-d] [-n] [-r remote-host] [user@]host -p PORTS [-- ssh-args...]
+usage: ssh-tunnel [-s] [-d] [-n] [-b bind-addr] [-r remote-host] [user@]host -p PORTS [-- ssh-args...]
 
   -p, --ports PORTS     comma-separated: N | A-B | L:R   (required)
+  -s, --skip-busy       drop local ports already in use instead of failing
+  -b, --bind ADDR       local bind address (default: 127.0.0.1)
   -r, --remote-host H   remote end of the forwards (default: localhost)
   -d, --detach          fork into the background (ssh -f)
   -n, --dry-run         print the ssh command instead of running it
@@ -44,6 +59,8 @@ ssh_bin=/usr/bin/ssh
 ports=""
 target=""
 rhost=localhost
+baddr=127.0.0.1
+skip_busy=0
 detach=0
 dry=0
 extra=()
@@ -56,6 +73,9 @@ while [ $# -gt 0 ]; do
         -p=* | --ports=*)   ports="${1#*=}"; shift ;;
         -r | --remote-host) need_arg "$@"; rhost="$2"; shift 2 ;;
         -r=* | --remote-host=*) rhost="${1#*=}"; shift ;;
+        -b | --bind)        need_arg "$@"; baddr="$2"; shift 2 ;;
+        -b=* | --bind=*)    baddr="${1#*=}"; shift ;;
+        -s | --skip-busy)   skip_busy=1; shift ;;
         -d | --detach)      detach=1; shift ;;
         -n | --dry-run)     dry=1; shift ;;
         -h | --help)        usage; exit 0 ;;
@@ -69,13 +89,13 @@ done
 [ -n "$target" ] || { usage; exit 2; }
 [ -n "$ports" ] || die "no ports given (-p)"
 
-# Expand the spec into parallel local/remote lists. `seen` keeps the local ports
-# already claimed (space-padded for whole-word matching) so a duplicate is
+# Expand the spec into parallel local/remote lists. `claimed` holds the local
+# ports already taken (space-padded for whole-word matching) so a duplicate is
 # dropped and a conflicting duplicate is an error, rather than ssh failing on
 # the second bind.
 locals=()
 remotes=()
-seen=" "
+claimed=" "
 
 check_port() {
     case "$1" in
@@ -88,7 +108,7 @@ add() {  # add <local> <remote> <item, for messages>
     local l="$1" r="$2" item="$3" i
     check_port "$l" "$item"
     check_port "$r" "$item"
-    case "$seen" in *" $l "*)
+    case "$claimed" in *" $l "*)
         for i in "${!locals[@]}"; do
             [ "${locals[$i]}" = "$l" ] || continue
             [ "${remotes[$i]}" = "$r" ] && return 0
@@ -97,7 +117,7 @@ add() {  # add <local> <remote> <item, for messages>
     esac
     locals+=("$l")
     remotes+=("$r")
-    seen="$seen$l "
+    claimed="$claimed$l "
 }
 
 IFS=, read -r -a items <<<"$ports"
@@ -120,10 +140,75 @@ done
 
 [ ${#locals[@]} -gt 0 ] || die "port spec expanded to nothing: '$ports'"
 
+# Listening TCP sockets as "port<TAB>address<TAB>command(pid)" rows. ss on
+# Linux, lsof elsewhere (macOS has it out of the box); silence means "couldn't
+# look", not "nothing is listening".
+listeners() {
+    if command -v ss >/dev/null 2>&1; then
+        ss -Hlntp 2>/dev/null | awk '
+            {
+                addr = $4; port = addr
+                sub(/.*:/, "", port); sub(/:[^:]*$/, "", addr)
+                who = "?"
+                if (match($0, /users:\(\("[^"]+",pid=[0-9]+/)) {
+                    who = substr($0, RSTART, RLENGTH)
+                    sub(/users:\(\("/, "", who); sub(/",pid=/, "(", who)
+                    who = who ")"
+                }
+                print port "\t" addr "\t" who
+            }'
+    elif command -v lsof >/dev/null 2>&1; then
+        # -F emits one field per line (p=pid, c=command, n=name), which beats
+        # column-counting lsof's variable-width table.
+        lsof -nP -iTCP -sTCP:LISTEN -F cnp 2>/dev/null | awk '
+            /^p/ { pid = substr($0, 2); next }
+            /^c/ { cmd = substr($0, 2); next }
+            /^n/ {
+                name = substr($0, 2); port = name; addr = name
+                sub(/.*:/, "", port); sub(/:[^:]*$/, "", addr)
+                print port "\t" addr "\t" cmd "(" pid ")"
+            }'
+    fi
+}
+
+# Which of the wanted local ports already have a listener on an address that
+# collides with our bind address (an exact match, or a wildcard).
+busy=" "
+busy_rows=""
+while IFS="$(printf '\t')" read -r lport laddr lwho; do
+    [ -n "$lport" ] || continue
+    case "$claimed" in *" $lport "*) ;; *) continue ;; esac
+    case "$busy" in *" $lport "*) continue ;; esac
+    if [ "$laddr" = "$baddr" ] || [ "$laddr" = '*' ] || [ "$laddr" = '0.0.0.0' ] \
+        || [ "$laddr" = '[::]' ] || [ "$laddr" = '::' ]; then
+        busy="$busy$lport "
+        busy_rows="$busy_rows  $lport  $lwho"$'\n'
+    fi
+done <<<"$(listeners)"
+
+if [ "$busy" != " " ]; then
+    # ss/lsof list sockets in their own order; report ports in numeric order.
+    n=$(printf '%s' "$busy" | wc -w | tr -d ' ')
+    busy_list=$(printf '%s' "$busy" | tr -s ' ' '\n' | grep . | sort -n | paste -sd, -)
+    if [ "$skip_busy" -eq 1 ]; then
+        echo "ssh-tunnel: skipping $n busy local port(s): $busy_list" >&2
+    else
+        echo "ssh-tunnel: $n of ${#locals[@]} local port(s) already in use:" >&2
+        printf '%s' "$busy_rows" | sort -n >&2
+        die "free them, bind elsewhere (-b), or forward the rest (-s)"
+    fi
+fi
+
 fwd=()
+kept=0
 for i in "${!locals[@]}"; do
-    fwd+=(-L "${locals[$i]}:$rhost:${remotes[$i]}")
+    if [ "$skip_busy" -eq 1 ]; then
+        case "$busy" in *" ${locals[$i]} "*) continue ;; esac
+    fi
+    fwd+=(-L "$baddr:${locals[$i]}:$rhost:${remotes[$i]}")
+    kept=$((kept + 1))
 done
+[ "$kept" -gt 0 ] || die "every wanted port is in use; nothing left to forward"
 
 cmd=("$ssh_bin" -N)
 [ "$detach" -eq 1 ] && cmd+=(-f)
@@ -141,5 +226,5 @@ if [ "$dry" -eq 1 ]; then
     exit 0
 fi
 
-echo "ssh-tunnel: $target, ${#locals[@]} port(s): $ports" >&2
+echo "ssh-tunnel: $target, $kept port(s) on $baddr" >&2
 exec "${cmd[@]}"
