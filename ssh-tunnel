@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Open an ssh port-forwarding tunnel (ssh -N) from a compact port spec, instead
+# of spelling out one -L per port.
+#
+#   ssh-tunnel ivan@ai -p 8002-8007,8080-8085,9000
+#   ssh-tunnel -d ivan@ai -p 3000,5432          # detach into the background
+#   ssh-tunnel -n ivan@ai -p 8000-8002          # dry run: just print the command
+#   ssh-tunnel ivan@ai -p 8080 -- -J bastion -i ~/.ssh/id_ed25519
+#
+# Port spec items, comma-separated:
+#   N      local N      -> remote N
+#   A-B    every port in the range, 1:1
+#   L:R    local L      -> remote R
+# The remote end is localhost unless -r/--remote-host names another host (that
+# name is resolved on the remote side).
+#
+# ssh gets ExitOnForwardFailure plus keepalives, so a local port that is already
+# taken fails loudly instead of leaving a half-working tunnel. Anything after --
+# is handed to ssh *before* those defaults, so it wins: ssh keeps the first
+# value it sees for an option (e.g. `-- -o ExitOnForwardFailure=no`).
+#
+# The real ssh is called directly, bypassing the `ssh` tint wrapper in this
+# directory — a background tunnel has no business recoloring the terminal.
+
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'USAGE'
+usage: ssh-tunnel [-d] [-n] [-r remote-host] [user@]host -p PORTS [-- ssh-args...]
+
+  -p, --ports PORTS     comma-separated: N | A-B | L:R   (required)
+  -r, --remote-host H   remote end of the forwards (default: localhost)
+  -d, --detach          fork into the background (ssh -f)
+  -n, --dry-run         print the ssh command instead of running it
+  -h, --help            this
+USAGE
+}
+
+die() { echo "ssh-tunnel: $*" >&2; exit 2; }
+
+ssh_bin=/usr/bin/ssh
+[ -x "$ssh_bin" ] || die "no ssh at $ssh_bin"
+
+ports=""
+target=""
+rhost=localhost
+detach=0
+dry=0
+extra=()
+
+need_arg() { [ $# -ge 2 ] || die "$1 needs a value"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p | --ports)       need_arg "$@"; ports="$2"; shift 2 ;;
+        -p=* | --ports=*)   ports="${1#*=}"; shift ;;
+        -r | --remote-host) need_arg "$@"; rhost="$2"; shift 2 ;;
+        -r=* | --remote-host=*) rhost="${1#*=}"; shift ;;
+        -d | --detach)      detach=1; shift ;;
+        -n | --dry-run)     dry=1; shift ;;
+        -h | --help)        usage; exit 0 ;;
+        --)                 shift; extra+=("$@"); break ;;
+        -*)                 die "unknown option: $1 (ssh options go after --)" ;;
+        *)                  [ -z "$target" ] || die "unexpected argument: $1"
+                            target="$1"; shift ;;
+    esac
+done
+
+[ -n "$target" ] || { usage; exit 2; }
+[ -n "$ports" ] || die "no ports given (-p)"
+
+# Expand the spec into parallel local/remote lists. `seen` keeps the local ports
+# already claimed (space-padded for whole-word matching) so a duplicate is
+# dropped and a conflicting duplicate is an error, rather than ssh failing on
+# the second bind.
+locals=()
+remotes=()
+seen=" "
+
+check_port() {
+    case "$1" in
+        "" | *[!0-9]*) die "not a port number: '$1' (in '$2')" ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || die "port out of range: $1 (in '$2')"
+}
+
+add() {  # add <local> <remote> <item, for messages>
+    local l="$1" r="$2" item="$3" i
+    check_port "$l" "$item"
+    check_port "$r" "$item"
+    case "$seen" in *" $l "*)
+        for i in "${!locals[@]}"; do
+            [ "${locals[$i]}" = "$l" ] || continue
+            [ "${remotes[$i]}" = "$r" ] && return 0
+            die "local port $l mapped to both ${remotes[$i]} and $r"
+        done ;;
+    esac
+    locals+=("$l")
+    remotes+=("$r")
+    seen="$seen$l "
+}
+
+IFS=, read -r -a items <<<"$ports"
+for item in ${items[@]+"${items[@]}"}; do
+    [ -n "$item" ] || continue
+    case "$item" in
+        *:*:*) die "too many colons in '$item' (use L:R, and -r for the remote host)" ;;
+        *-*-*) die "too many dashes in '$item' (use A-B)" ;;
+        *:*)   add "${item%%:*}" "${item#*:}" "$item" ;;
+        *-*)
+            from="${item%%-*}"; to="${item#*-}"
+            check_port "$from" "$item"
+            check_port "$to" "$item"
+            [ "$from" -le "$to" ] || die "reversed range: '$item'"
+            for ((p = from; p <= to; p++)); do add "$p" "$p" "$item"; done
+            ;;
+        *)     add "$item" "$item" "$item" ;;
+    esac
+done
+
+[ ${#locals[@]} -gt 0 ] || die "port spec expanded to nothing: '$ports'"
+
+fwd=()
+for i in "${!locals[@]}"; do
+    fwd+=(-L "${locals[$i]}:$rhost:${remotes[$i]}")
+done
+
+cmd=("$ssh_bin" -N)
+[ "$detach" -eq 1 ] && cmd+=(-f)
+cmd+=(
+    ${extra[@]+"${extra[@]}"}
+    -o ExitOnForwardFailure=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+    "${fwd[@]}"
+    "$target"
+)
+
+if [ "$dry" -eq 1 ]; then
+    printf '%q ' "${cmd[@]}"; echo
+    exit 0
+fi
+
+echo "ssh-tunnel: $target, ${#locals[@]} port(s): $ports" >&2
+exec "${cmd[@]}"
