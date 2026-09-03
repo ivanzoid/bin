@@ -28,6 +28,12 @@
 # check is advisory -- ExitOnForwardFailure still catches whatever it missed
 # (no ss/lsof, a listener on another address, a race).
 #
+# ControlPath=none keeps the tunnel off the connection-sharing socket. Sharing
+# would hand the forwards to the master process instead, where ControlPersist
+# outlives this client: the tunnel keeps listening after ssh-tunnel exits, and
+# the next run finds its own ports held by an ssh nobody remembers starting.
+# A dedicated connection costs one extra handshake and dies when asked to.
+#
 # Anything after -- is handed to ssh *before* the defaults above, so it wins:
 # ssh keeps the first value it sees for an option (e.g. `-- -4`, or
 # `-- -o ExitOnForwardFailure=no`).
@@ -175,6 +181,7 @@ listeners() {
 # collides with our bind address (an exact match, or a wildcard).
 busy=" "
 busy_rows=""
+busy_ssh=0
 while IFS="$(printf '\t')" read -r lport laddr lwho; do
     [ -n "$lport" ] || continue
     case "$claimed" in *" $lport "*) ;; *) continue ;; esac
@@ -183,6 +190,7 @@ while IFS="$(printf '\t')" read -r lport laddr lwho; do
         || [ "$laddr" = '[::]' ] || [ "$laddr" = '::' ]; then
         busy="$busy$lport "
         busy_rows="$busy_rows  $lport  $lwho"$'\n'
+        case "$lwho" in ssh\(*) busy_ssh=1 ;; esac
     fi
 done <<<"$(listeners)"
 
@@ -195,6 +203,12 @@ if [ "$busy" != " " ]; then
     else
         echo "ssh-tunnel: $n of ${#locals[@]} local port(s) already in use:" >&2
         printf '%s' "$busy_rows" | sort -n >&2
+        # An ssh holding the ports is usually a ControlPersist master that
+        # outlived the client that opened the forwards -- invisible, so say so.
+        [ "$busy_ssh" -eq 1 ] && echo "ssh-tunnel: an ssh holds some of these;" \
+            "a persisted ControlMaster keeps forwards alive after its client" \
+            "exits -- check with 'ssh -O check $target', drop with" \
+            "'ssh -O exit $target'" >&2
         die "free them, bind elsewhere (-b), or forward the rest (-s)"
     fi
 fi
@@ -215,6 +229,7 @@ cmd=("$ssh_bin" -N)
 cmd+=(
     ${extra[@]+"${extra[@]}"}
     -o ExitOnForwardFailure=yes
+    -o ControlPath=none
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=3
     "${fwd[@]}"
