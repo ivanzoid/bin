@@ -161,35 +161,38 @@ def rgb2tft(r, g, b):
 def convertPrusaThumb2TFTThumb(PrusaGCodeFileName): #Replace PrusaSlicer's Thumbnails to TFT's Thumbnails
     if not exists(PrusaGCodeFileName):
         return
-    
-    PrusaGCodeDatas = open(PrusaGCodeFileName).read() # ......................................................................... completly loading gcode file
-    
-    #regex for parsing datas with grouped part (matched)
+
+    with open(PrusaGCodeFileName, encoding="utf-8") as f:
+        PrusaGCodeDatas = f.read()
+
+    # One "; thumbnail begin WxH SIZE ... ; thumbnail end" block per configured
+    # thumbnail size. Group 6 is the base64 PNG payload.
     s_pattern = '(?<=(; thumbnail begin )([0-9]+)(x)([0-9]+) ([0-9]+)\n)(.*?)(?=; thumbnail end)'
     pattern = re.compile(s_pattern, re.M|re.I|re.S )
-    
+
+    # Collect ALL converted previews first, then assemble the output exactly
+    # once. The old code appended the whole stripped G-code inside this loop,
+    # so with two thumbnails configured (e.g. 48x48 + 300x300) the printer got
+    # the complete print twice in one file and printed the model a second time.
     TFTGCodeDatas = ''
-    
-    for match in pattern.finditer(PrusaGCodeDatas): #............................................................................ get all needed parts
-        th_width  = match.group(2)
-        th_height = match.group(4)
-        th_size   = match.group(5)
-        
+    for match in pattern.finditer(PrusaGCodeDatas):
         try:
             th_datas  = match.group(6) # ........................................................................................ get image datas (base64)
             th_datas = th_datas.replace('; ', '').replace('\n', '') # ........................................................... without carry returns, etc
             stream = BytesIO( base64.b64decode(th_datas) ) # .................................................................... decoding base64
             image = Image.open(stream).convert("RGB") # ......................................................................... for converting into PIL image
             stream.close()
-            TFTGCodeDatas += generate_tft(image) # .............................................................................. converts PIL image into TFT GCode
-            s_pattern = '; thumbnail begin .*; thumbnail end'
-            TFTGCodeDatas = TFTGCodeDatas + '\n' +  re.sub( s_pattern, '', PrusaGCodeDatas, flags = re.M|re.I|re.S ) # .......... removes Prusa GCode and inserts TFTG Code
-            fileOut = open(PrusaGCodeFileName, "w") 
-            fileOut.write(TFTGCodeDatas)
-            fileOut.close()
-            
-        except:
-            pass
+            TFTGCodeDatas += generate_tft(image) + '\n' # ....................................................................... converts PIL image into TFT GCode
+        except Exception as e:
+            print("thumbnail conversion failed: %r" % (e,), file=sys.stderr)
+
+    if not TFTGCodeDatas:
+        return # nothing converted -> leave the file untouched
+
+    # Remove every slicer thumbnail block (non-greedy: one block at a time).
+    body = re.sub('; thumbnail begin .*?; thumbnail end\n?', '', PrusaGCodeDatas, flags = re.M|re.I|re.S)
+    with open(PrusaGCodeFileName, "w", encoding="utf-8") as fileOut:
+        fileOut.write(TFTGCodeDatas + body)
     return
 
 try:
