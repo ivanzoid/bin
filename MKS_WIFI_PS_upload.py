@@ -335,7 +335,7 @@ def extract_preview(text, box):
 def read_gcode_info(path, preview_box):
     """Preview image + the display-ready facts we can dig out of the G-code."""
     info = {"preview": None, "rows": [], "time": None, "filament": None,
-            "layers": None, "raw": {}}
+            "layers": None, "preheat": (None, None), "raw": {}}
     try:
         head, tail = _read_ends(path)
     except OSError as e:
@@ -389,13 +389,19 @@ def read_gcode_info(path, preview_box):
         else:
             rows.append(("Material", (fname or ftype).strip('"')))
 
-    hot = _first_num(_pick(meta, 'nozzle_temperature', 'temperature',
-                           'first_layer_temperature'))
-    bed = _first_num(_pick(meta, 'bed_temperature', 'first_layer_bed_temperature',
-                           'hot_plate_temp', 'bed_temperature_initial_layer'))
+    hot = _first_num(_pick(meta, 'first_layer_temperature',
+                           'nozzle_temperature_initial_layer',
+                           'nozzle_temperature', 'temperature'))
+    bed = _first_num(_pick(meta, 'first_layer_bed_temperature',
+                           'bed_temperature_initial_layer',
+                           'hot_plate_temp_initial_layer',
+                           'bed_temperature', 'hot_plate_temp'))
     if hot or bed:
         rows.append(("Temps", "%s / %s" % ("%d C" % hot if hot else "-",
                                            "%d C" % bed if bed else "-")))
+    # What the preheat will send: first-layer targets, so the print's M190/M109
+    # return immediately instead of waiting out a cold bed.
+    info["preheat"] = (int(hot) if hot else None, int(bed) if bed else None)
 
     speed = _first_num(_pick(meta, 'max_print_speed', 'outer_wall_speed', 'perimeter_speed'))
     if speed:
@@ -569,18 +575,28 @@ class Uploader:
 
         det = self._card(right)
         det.pack(fill='both', expand=True, pady=(12, 0))
-        inner = tk.Frame(det, bg=Theme.panel)
-        inner.pack(fill='both', expand=True, padx=14, pady=11)
-        rows = self.info["rows"][:8]
-        if not rows:
-            self._label(inner, "no slicer metadata found", self.f_body,
-                        Theme.dim, Theme.panel).pack(anchor='w')
-        for i, (k, v) in enumerate(rows):
-            self._label(inner, k, self.f_body, Theme.muted, Theme.panel).grid(
-                row=i, column=0, sticky='w', pady=1)
-            self._label(inner, v, self.f_body, Theme.text, Theme.panel).grid(
-                row=i, column=1, sticky='e', pady=1)
-        inner.grid_columnconfigure(1, weight=1)
+        self._det = tk.Frame(det, bg=Theme.panel)
+        self._det.pack(fill='both', expand=True, padx=14, pady=11)
+        self._det_rows = 0
+        self._det_empty = None
+        for k, v in self.info["rows"][:8]:
+            self.add_detail(k, v)
+        if not self._det_rows:
+            self._det_empty = self._label(self._det, "no slicer metadata found",
+                                          self.f_body, Theme.dim, Theme.panel)
+            self._det_empty.grid(row=0, column=0, columnspan=2, sticky='w')
+        self._det.grid_columnconfigure(1, weight=1)
+
+    def add_detail(self, key, value):
+        """Append a row to the details card (also used for runtime facts)."""
+        if self._det_empty is not None:
+            self._det_empty.destroy()
+            self._det_empty = None
+        self._label(self._det, key, self.f_body, Theme.muted, Theme.panel).grid(
+            row=self._det_rows, column=0, sticky='w', pady=1)
+        self._label(self._det, value, self.f_body, Theme.text, Theme.panel).grid(
+            row=self._det_rows, column=1, sticky='e', pady=1)
+        self._det_rows += 1
 
     def _tile(self, parent, title, value, col):
         card = self._card(parent)
@@ -787,16 +803,93 @@ def upload_progress(size, progress):
                       _fmt_bytes(rate), _fmt_secs(eta)))
 
 
-def startJob(ip_addr, sd_name):
-    ui.set_status("Starting print job...", Theme.text, "M23 / M24 -> %s:8080" % ip_addr)
+def send_gcode(ip_addr, *commands):
+    """Push M-codes at the WiFi module's raw G-code port. Raises on failure."""
+    host = ip_addr.split(":")[0]  # the HTTP port never applies here
     socket = pysock.socket(pysock.AF_INET, pysock.SOCK_STREAM)
     socket.settimeout(10)
     try:
-        socket.connect((ip_addr, 8080))
-        socket.send(("M23 %s" % sd_name + "\r\n").encode())
-        socket.send(("M24" + "\r\n").encode())
+        socket.connect((host, 8080))
+        for cmd in commands:
+            socket.send((cmd + "\r\n").encode())
         socket.shutdown(pysock.SHUT_RDWR)
+    finally:
         socket.close()
+    _dbg("sent to %s:8080: %r" % (host, commands))
+
+
+def printer_status(ip_addr):
+    """Ask the WiFi module what the printer is doing (MKS M997).
+
+    Returns 'PRINTING', 'PAUSE' or 'IDLE'; None when the module says nothing
+    we recognise. None is deliberately NOT treated as idle -- firmware
+    revisions differ, and guessing wrong means changing the temperature of
+    somebody else's running print. The raw reply goes to the debug log
+    (`touch ~/.mks_wifi_debug`) so an unrecognised one can be taught here.
+    """
+    host = ip_addr.split(":")[0]
+    socket = pysock.socket(pysock.AF_INET, pysock.SOCK_STREAM)
+    socket.settimeout(5)
+    reply = ""
+    try:
+        socket.connect((host, 8080))
+        socket.send(b"M997\r\n")
+        for _ in range(3):  # the module may echo before it answers
+            data = socket.recv(512)
+            if not data:
+                break
+            reply += data.decode("ascii", "ignore")
+            if any(k in reply.upper() for k in ("PRINTING", "PAUSE", "IDLE")):
+                break
+    except Exception as e:
+        _dbg("M997 status query failed: %r" % (e,))
+        return None
+    finally:
+        socket.close()
+    _dbg("M997 reply: %r" % (reply,))
+    up = reply.upper()
+    for state in ("PRINTING", "PAUSE", "IDLE"):
+        if state in up:
+            return state
+    return None
+
+
+def preheat(ip_addr, hot, bed):
+    """Start the heaters before the upload so they ramp while it transfers.
+
+    M104/M140 set a target and return; M109/M190 would block the printer
+    until it is reached, which would stall everything behind it.
+    """
+    cmds = []
+    if bed:
+        cmds.append("M140 S%d" % bed)   # bed first: it is the slow one
+    if hot:
+        cmds.append("M104 S%d" % hot)
+    if not cmds:
+        return False
+    try:
+        send_gcode(ip_addr, *cmds)
+    except Exception as e:
+        # Not fatal -- the print still works, it just starts cold.
+        _dbg("preheat FAILED: %r" % (e,))
+        print("Preheat on %s failed: %r" % (ip_addr, e), file=sys.stderr)
+        return False
+    return True
+
+
+def cooldown(ip_addr):
+    """Undo a preheat we are not going to use, so nothing sits hot unattended."""
+    try:
+        send_gcode(ip_addr, "M104 S0", "M140 S0")
+    except Exception as e:
+        _dbg("cooldown FAILED: %r" % (e,))
+        print("Could not cool down %s: %r" % (ip_addr, e), file=sys.stderr)
+
+
+def startJob(ip_addr, sd_name):
+    ui.set_status("Starting print job...", Theme.text, "M23 / M24 -> %s:8080" % ip_addr)
+    try:
+        send_gcode(ip_addr, "M23 %s" % sd_name, "M24")
     except Exception as e:
         _dbg("startJob FAILED: %r" % (e,))
         ui.set_dot(Theme.err)
@@ -825,8 +918,26 @@ def startTransfer():
     if not info["layers"]:
         ui.set_tile("layers", "...")  # counted from the stream, filled in below
     ui.set_subtitle("%s  -  %s" % (_fmt_bytes(total), sd_name))
-    ui.set_status("Connecting to %s..." % ip_addr)
 
+    # Start the heaters now so they ramp while the file transfers. Only on a
+    # printer that positively reports itself idle: M104/M140 take effect
+    # immediately, so firing them at a running print would wreck it.
+    hot, bed = info["preheat"]
+    state = printer_status(ip_addr) if PREHEAT and (hot or bed) else None
+    preheated = False
+    if state == "IDLE":
+        ui.set_status("Preheating %s..." % ip_addr, Theme.text,
+                      "M140 S%s / M104 S%s" % (bed or "-", hot or "-"))
+        preheated = preheat(ip_addr, hot, bed)
+        ui.add_detail("Preheat", "%s / %s C" % (hot or "-", bed or "-")
+                                 if preheated else "failed, see stderr")
+    elif state:
+        _dbg("skipping preheat: printer is %s" % state)
+        ui.add_detail("Preheat", "skipped, printer %s" % state.lower())
+    elif PREHEAT and (hot or bed):
+        ui.add_detail("Preheat", "skipped, no status from printer")
+
+    ui.set_status("Connecting to %s..." % ip_addr)
     _upload_start[0] = time.time()
     _dbg("uploading to %s (uid=%d) file=%s" % (ip_addr, os.getuid(), sd_name))
     # timeout=(connect, read): fail fast if the printer is unreachable or stops
@@ -846,6 +957,8 @@ def startTransfer():
         ui.set_status("Upload failed", Theme.err, _short_err(e))
         print("Upload to {0} failed: {1}".format(ip_addr, e), file=sys.stderr)
         body.close()
+        if preheated:
+            cooldown(ip_addr)
         ui.wait(6)
         root.destroy()
         sys.exit(1)
@@ -860,13 +973,24 @@ def startTransfer():
                   "%s in %s (%s/s)" % (_fmt_bytes(total), _fmt_secs(took),
                                        _fmt_bytes(total / max(took, 1e-3))))
 
-    if mode == "always":
+    if state in ("PRINTING", "PAUSE"):
+        # Positive evidence the printer is busy: do not hijack it with M23/M24.
+        ui.set_dot(Theme.warn)
+        ui.set_status("Uploaded - printer is busy", Theme.warn,
+                      "%s reports %s; start %s from the panel when it is free"
+                      % (ip_addr, state.lower(), sd_name))
+    elif mode == "always":
         ui.wait(2)
         startJob(ip_addr, sd_name)
     elif mode == "never":
-        pass
+        if preheated:
+            cooldown(ip_addr)
     elif ui.ask("Start the print job now?"):
         startJob(ip_addr, sd_name)
+    elif preheated:
+        cooldown(ip_addr)
+        ui.set_status("Uploaded, heaters off", Theme.ok,
+                      "start %s from the printer whenever you like" % sd_name)
 
     ui.wait(4, "closing in %ds")
     root.destroy()
@@ -878,6 +1002,7 @@ def startTransfer():
 
 mode = "always"
 ip_addr = "10.0.0.55"
+PREHEAT = True  # set the G-code's first-layer temps while the file uploads
 
 root = tk.Tk()
 root.withdraw()  # keep the empty frame off-screen until the UI is populated
