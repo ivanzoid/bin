@@ -4,7 +4,14 @@
 # PrusaSlicer Thumbnail to TFT Thumbnail converter: @SH1NZ33
 # Fix for PrusaSlicer 2.4 and newer: @WashingtonJunior
 # encoding fix: @Goodsmileduck
-# version: 0.4.0
+# version: 0.5.0
+#
+# This script never modifies the sliced file: it reads the G-code to show you
+# what is about to print and streams the exact bytes to the printer. Earlier
+# versions rewrote the file in place, swapping the slicer's PNG thumbnails for
+# MKS TFT ";simage:/;gimage:" previews -- that clobbered the saved G-code (and
+# duplicated the print when two thumbnail sizes were configured), so it is gone.
+# Consequence: the printer's own screen shows no preview for these uploads.
 #
 # Portable setup for use as an OrcaSlicer post-processing script:
 #   OrcaSlicer is a GUI app, so it runs this via the system python3 (the shebang
@@ -127,299 +134,771 @@ _disclaim_from_parent()  # macOS: escape OrcaSlicer's Local Network restriction
 _bootstrap()
 # --- end self-bootstrapping venv -------------------------------------------
 
-import requests, io, time
+import time
+import base64
 import socket as pysock
 
-import base64
-import regex as re # pip install regex
-from os.path import exists
+import requests
+import regex as re  # pip install regex
 from io import BytesIO
-from PIL import Image # pip install Pillow
-
-def generate_tft(img):
-    width, height = img.size
-    if(width == 100):
-        res = ';simage:'
-    else:
-        res = ';;gimage:'
-    pixels = img.convert('RGB')
-    for y in range(width):
-        for x in range(height):
-            r, g, b = pixels.getpixel((x,y))
-            res += rgb2tft(r, g, b)
-        res += '\nM10086 ;'
-    return res
-
-def rgb2tft(r, g, b):
-    #src: mks-wifi plugin : https://github.com/Jeredian/mks-wifi-plugin/blob/develop/MKSPreview.py
-    r = r >> 3
-    g = g >> 2
-    b = b >> 3
-    rgb = (r << 11) | (g << 5) | b
-    return '{:02x}'.format(rgb & 0xFF) + '{:02x}'.format(((rgb >> 8) & 0xFF))
-
-def convertPrusaThumb2TFTThumb(PrusaGCodeFileName): #Replace PrusaSlicer's Thumbnails to TFT's Thumbnails
-    if not exists(PrusaGCodeFileName):
-        return
-
-    with open(PrusaGCodeFileName, encoding="utf-8") as f:
-        PrusaGCodeDatas = f.read()
-
-    # One "; thumbnail begin WxH SIZE ... ; thumbnail end" block per configured
-    # thumbnail size. Group 6 is the base64 PNG payload.
-    s_pattern = '(?<=(; thumbnail begin )([0-9]+)(x)([0-9]+) ([0-9]+)\n)(.*?)(?=; thumbnail end)'
-    pattern = re.compile(s_pattern, re.M|re.I|re.S )
-
-    # Collect ALL converted previews first, then assemble the output exactly
-    # once. The old code appended the whole stripped G-code inside this loop,
-    # so with two thumbnails configured (e.g. 48x48 + 300x300) the printer got
-    # the complete print twice in one file and printed the model a second time.
-    TFTGCodeDatas = ''
-    for match in pattern.finditer(PrusaGCodeDatas):
-        try:
-            th_datas  = match.group(6) # ........................................................................................ get image datas (base64)
-            th_datas = th_datas.replace('; ', '').replace('\n', '') # ........................................................... without carry returns, etc
-            stream = BytesIO( base64.b64decode(th_datas) ) # .................................................................... decoding base64
-            image = Image.open(stream).convert("RGB") # ......................................................................... for converting into PIL image
-            stream.close()
-            TFTGCodeDatas += generate_tft(image) + '\n' # ....................................................................... converts PIL image into TFT GCode
-        except Exception as e:
-            print("thumbnail conversion failed: %r" % (e,), file=sys.stderr)
-
-    if not TFTGCodeDatas:
-        return # nothing converted -> leave the file untouched
-
-    # Remove every slicer thumbnail block (non-greedy: one block at a time).
-    body = re.sub('; thumbnail begin .*?; thumbnail end\n?', '', PrusaGCodeDatas, flags = re.M|re.I|re.S)
-    with open(PrusaGCodeFileName, "w", encoding="utf-8") as fileOut:
-        fileOut.write(TFTGCodeDatas + body)
-    return
+from PIL import Image, ImageTk  # pip install Pillow
 
 try:
-    import Tkinter as tk
-    import Tkinter.simpledialog as smdg
-    import Tkinter.filedialog as fldg
-    import Tkinter.messagebox as msbx
-except ImportError:
     import tkinter as tk
-    import tkinter.simpledialog as smdg
+    import tkinter.font as tkfont
     import tkinter.filedialog as fldg
-    import tkinter.messagebox as msbx
+except ImportError:  # py2 fallback kept from the original script
+    import Tkinter as tk
+    import tkFont as tkfont
+    import tkFileDialog as fldg
 
-try:
-    import ttk
-    py3 = False
-except ImportError:
-    import tkinter.ttk as ttk
-    py3 = True
 
-def vp_start_gui():
-    '''Starting point when module is the main routine.'''
-    global val, w, root
-    root = tk.Tk()
-    top = Main (root)
-    gui_init(root, top)
-    root.mainloop()
+# ===========================================================================
+# G-code introspection: embedded preview + slicer metadata
+# ===========================================================================
 
-w = None
-def create_Main(rt, *args, **kwargs):
-    '''Starting point when module is imported by another module.
-       Correct form of call: 'create_Main(root, *args, **kwargs)' .'''
-    global w, w_win, root
-    #rt = root
-    root = rt
-    w = tk.Toplevel (root)
-    top = Main (w)
-    gui_init(w, top, *args, **kwargs)
-    return (w, top)
+# Slicers write the previews at the top and (PrusaSlicer) the stats/config at
+# the very bottom, so we sniff both ends instead of loading a 200 MB print.
+_HEAD_BYTES = 4 * 1024 * 1024
+_TAIL_BYTES = 512 * 1024
 
-def gui_destroy_Main():
-    global w
-    w.destroy()
-    w = None
+# "; thumbnail begin 300x300 12345" ... "; thumbnail end". OrcaSlicer also
+# emits thumbnail_JPG / thumbnail_QOI blocks; we read whatever Pillow opens.
+_THUMB_RE = re.compile(
+    r'^;[ \t]*thumbnail(?:_(?P<fmt>[A-Za-z0-9]+))?[ \t]+begin[ \t]+'
+    r'(?P<w>\d+)[xX](?P<h>\d+)[ \t]+(?P<size>\d+)[ \t]*$'
+    r'(?P<data>.*?)'
+    r'^;[ \t]*thumbnail(?:_[A-Za-z0-9]+)?[ \t]+end[ \t]*$',
+    re.M | re.S)
 
-class Main:
-    def __init__(self, top=None):
-        '''This class configures and populates the toplevel window.
-           top is the toplevel containing window.'''
-        _bgcolor = '#d9d9d9'  # X11 color: 'gray85'
-        _fgcolor = '#000000'  # X11 color: 'black'
-        _compcolor = '#d9d9d9' # X11 color: 'gray85'
-        _ana1color = '#d9d9d9' # X11 color: 'gray85'
-        _ana2color = '#ececec' # Closest X11 color: 'gray92'
-        self.style = ttk.Style()
-        if sys.platform == "win32":
-            self.style.theme_use('winnative')
-        self.style.configure('.',background=_bgcolor)
-        self.style.configure('.',foreground=_fgcolor)
-        self.style.configure('.',font="TkDefaultFont")
-        self.style.map('.',background=
-            [('selected', _compcolor), ('active',_ana2color)])
+_KV_RE = re.compile(r'^;[ \t]*(?P<key>[^;=:]{1,80}?)[ \t]*[=:][ \t]*(?P<val>.*?)[ \t]*$')
+_GENERATED_RE = re.compile(r'^;[ \t]*generated by[ \t]+(?P<who>.+?)(?:[ \t]+on[ \t].*)?$', re.M | re.I)
 
-        top.geometry("400x60+630+507")
-        top.minsize(400, 60)
-        top.maxsize(400, 60)
-        top.resizable(0, 0)
-        top.title("MKS WIFI Uploader for Prusa Slicer")
-        top.configure(background="#d9d9d9")
 
-        # self.btn_Print = ttk.Button(top)
-        # self.btn_Print.place(relx=0.2, rely=0.67, height=25, width=100)
-        # self.btn_Print.configure(takefocus="")
-        # self.btn_Print.configure(text='''Print!''')
-        # self.btn_Print.configure(state='disabled')
-        # slef.btn_Print
+def _read_ends(path):
+    """Return (head_text, tail_text) so we can parse both metadata blocks."""
+    size = os.path.getsize(path)
+    with open(path, 'rb') as f:
+        head = f.read(_HEAD_BYTES)
+        if size > _HEAD_BYTES + _TAIL_BYTES:
+            f.seek(-_TAIL_BYTES, os.SEEK_END)
+            tail = f.read()
+        else:
+            tail = b''
+    dec = lambda b: b.decode('utf-8', 'ignore')
+    return dec(head), dec(tail)
 
-        # self.btm_NoThx = ttk.Button(top)
-        # self.btm_NoThx.place(relx=0.55, rely=0.67, height=25, width=100)
-        # self.btm_NoThx.configure(takefocus="")
-        # self.btm_NoThx.configure(text='''No, thanks!''')
-        # self.btm_NoThx.configure(state='disabled')
 
-        self.lbl_UploadStatus = ttk.Label(top)
-        self.lbl_UploadStatus.place(relx=0.023, rely=0.05, height=18, width=380)
-        self.lbl_UploadStatus.configure(background="#d9d9d9")
-        self.lbl_UploadStatus.configure(foreground="#000000")
-        self.lbl_UploadStatus.configure(font="TkDefaultFont")
-        self.lbl_UploadStatus.configure(relief="flat")
-        self.lbl_UploadStatus.configure(anchor='w')
-        self.lbl_UploadStatus.configure(justify='left')
-        self.lbl_UploadStatus.configure(text='''Upload starting...''')
+def _parse_kv(text, into):
+    """Harvest `; key = value` / `; key: value` comment pairs (first wins)."""
+    in_thumb = False
+    for line in text.splitlines():
+        if not line.startswith(';'):
+            continue
+        low = line.lower()
+        if 'thumbnail' in low and ' begin ' in low:
+            in_thumb = True
+            continue
+        if in_thumb:
+            if 'thumbnail' in low and ' end' in low:
+                in_thumb = False
+            continue
+        if len(line) > 400:
+            continue  # base64 leftovers / huge config blobs
+        # OrcaSlicer packs several pairs on one line:
+        #   "; model printing time: 30m; total estimated time: 35m"
+        parts = line.split(';') if ('=' not in line) else [line.lstrip(';')]
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            m = _KV_RE.match(';' + part)
+            if not m:
+                continue
+            key = m.group('key').strip().lower()
+            val = m.group('val').strip()
+            if key and val and key not in into:
+                into[key] = val
 
-        self.prg_UploadProgress = ttk.Progressbar(top)
-        self.prg_UploadProgress.place(relx=0.03, rely=0.45, relwidth=0.943
-                , relheight=0.0, height=22)
-        self.prg_UploadProgress.configure(length="420")
 
-class CancelledError(Exception):
-    def __init__(self, msg):
-        self.msg = msg
-        Exception.__init__(self, msg)
+def _pick(meta, *keys):
+    for k in keys:
+        v = meta.get(k)
+        if v:
+            return v
+    return None
 
-    def __str__(self):
-        return self.msg
 
-    __repr__ = __str__
+def _nums(val):
+    """Numbers out of "1.75" / "0.4,0.4" / "215,0,0,0" style values."""
+    if not val:
+        return []
+    out = []
+    for tok in re.split(r'[,\s]+', val):
+        try:
+            out.append(float(tok))
+        except ValueError:
+            pass
+    return out
 
-class BufferReader(io.BytesIO):
-    def __init__(self, buf=b'', callback=None, cb_args=(), cb_kwargs={}):
+
+def _first_num(val):
+    n = _nums(val)
+    return n[0] if n else None
+
+
+def _sum_num(val):
+    n = _nums(val)
+    return sum(n) if n else None
+
+
+def _uniq_words(val):
+    """"PLA;PETG" / "PLA,PLA" -> "PLA / PETG" (multi-material headers)."""
+    if not val:
+        return None
+    seen = []
+    for tok in re.split(r'[;,]', val):
+        tok = tok.strip()
+        if tok and tok not in seen:
+            seen.append(tok)
+    return ' / '.join(seen) if seen else None
+
+
+def _fmt_duration(text):
+    """Normalize "2h 11m 34s" / "7894" / "0d 2h 11m" into "2h 11m"."""
+    if not text:
+        return None
+    text = text.strip()
+    secs = None
+    m = re.findall(r'(\d+(?:\.\d+)?)\s*([dhms])', text, re.I)
+    if m:
+        mult = {'d': 86400, 'h': 3600, 'm': 60, 's': 1}
+        secs = sum(float(v) * mult[u.lower()] for v, u in m)
+    elif re.fullmatch(r'\d+(\.\d+)?', text):
+        secs = float(text)
+    if secs is None:
+        return text
+    return _fmt_secs(secs)
+
+
+def _fmt_secs(secs):
+    secs = int(round(secs))
+    d, rem = divmod(secs, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return "%dd %dh" % (d, h)
+    if h:
+        return "%dh %02dm" % (h, m)
+    if m:
+        return "%dm %02ds" % (m, s)
+    return "%ds" % s
+
+
+def _fmt_bytes(n):
+    if n is None:
+        return "-"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def extract_preview(text, box):
+    """Largest embedded thumbnail as a PIL image, scaled to fit `box` px."""
+    best = None
+    for m in _THUMB_RE.finditer(text):
+        try:
+            w, h = int(m.group('w')), int(m.group('h'))
+        except (TypeError, ValueError):
+            continue
+        if best is None or w * h > best[0]:
+            best = (w * h, m.group('data'))
+    if best is None:
+        return None
+    payload = ''.join(ln.lstrip(';').strip() for ln in best[1].splitlines())
+    try:
+        img = Image.open(BytesIO(base64.b64decode(payload)))
+        img.load()
+    except Exception as e:
+        print("preview decode failed: %r" % (e,), file=sys.stderr)
+        return None
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA")
+    scale = min(box / img.width, box / img.height)
+    if scale < 1 or scale > 1.001:
+        img = img.resize((max(1, int(img.width * scale)),
+                          max(1, int(img.height * scale))), Image.LANCZOS)
+    return img
+
+
+def read_gcode_info(path, preview_box):
+    """Preview image + the display-ready facts we can dig out of the G-code."""
+    info = {"preview": None, "rows": [], "time": None, "filament": None,
+            "layers": None, "raw": {}}
+    try:
+        head, tail = _read_ends(path)
+    except OSError as e:
+        print("cannot read %s: %r" % (path, e), file=sys.stderr)
+        return info
+
+    info["preview"] = extract_preview(head, preview_box)
+
+    meta = {}
+    _parse_kv(head, meta)
+    _parse_kv(tail, meta)
+    info["raw"] = meta
+
+    # --- headline numbers ---------------------------------------------------
+    info["time"] = _fmt_duration(_pick(
+        meta,
+        'estimated printing time (normal mode)', 'estimated printing time',
+        'total estimated time', 'model printing time', 'estimated_time',
+        'print_time', 'time'))
+
+    grams = _sum_num(_pick(meta, 'total filament used [g]', 'filament used [g]',
+                           'filament_weight_total', 'filament used [grams]'))
+    millis = _sum_num(_pick(meta, 'total filament length [mm]', 'filament used [mm]'))
+    if grams:
+        info["filament"] = "%.1f g" % grams
+    elif millis:
+        info["filament"] = "%.2f m" % (millis / 1000.0)
+
+    layers = _first_num(_pick(meta, 'total layer number', 'total_layer_count',
+                              'layer count', 'total layers'))
+    if layers:
+        info["layers"] = "%d" % int(layers)
+
+    # --- detail rows (only the ones this slicer actually wrote) -------------
+    rows = []
+
+    lh = _first_num(meta.get('layer_height'))
+    flh = _first_num(meta.get('first_layer_height'))
+    if lh:
+        rows.append(("Layer height", "%.2f mm" % lh + (" (first %.2f)" % flh if flh and abs(flh - lh) > 1e-6 else "")))
+
+    nozzle = _uniq_words(meta.get('nozzle_diameter'))
+    if nozzle:
+        rows.append(("Nozzle", "%s mm" % nozzle))
+
+    ftype = _uniq_words(_pick(meta, 'filament_type', 'filament type'))
+    fname = _uniq_words(_pick(meta, 'filament_settings_id', 'filament_name'))
+    if ftype or fname:
+        if ftype and fname and ftype.lower() not in fname.lower():
+            rows.append(("Material", "%s - %s" % (ftype, fname)))
+        else:
+            rows.append(("Material", (fname or ftype).strip('"')))
+
+    hot = _first_num(_pick(meta, 'nozzle_temperature', 'temperature',
+                           'first_layer_temperature'))
+    bed = _first_num(_pick(meta, 'bed_temperature', 'first_layer_bed_temperature',
+                           'hot_plate_temp', 'bed_temperature_initial_layer'))
+    if hot or bed:
+        rows.append(("Temps", "%s / %s" % ("%d C" % hot if hot else "-",
+                                           "%d C" % bed if bed else "-")))
+
+    speed = _first_num(_pick(meta, 'max_print_speed', 'outer_wall_speed', 'perimeter_speed'))
+    if speed:
+        rows.append(("Speed", "%d mm/s" % speed))
+
+    fill = _pick(meta, 'fill_density', 'sparse_infill_density')
+    if fill:
+        rows.append(("Infill", fill if '%' in fill else fill + " %"))
+
+    maxz = _first_num(_pick(meta, 'max_z_height', 'max_layer_z'))
+    if maxz:
+        rows.append(("Height", "%.1f mm" % maxz))
+
+    printer = _pick(meta, 'printer_model', 'printer_settings_id', 'printer_notes')
+    if printer:
+        rows.append(("Printer", printer.strip('"')[:32]))
+
+    cost = _first_num(_pick(meta, 'total filament cost', 'filament cost'))
+    if cost:
+        rows.append(("Cost", "%.2f" % cost))
+
+    gen = _GENERATED_RE.search(head) or _GENERATED_RE.search(tail)
+    if gen:
+        rows.append(("Sliced by", gen.group('who').strip()[:32]))
+
+    info["rows"] = rows
+    return info
+
+
+# ===========================================================================
+# UI
+# ===========================================================================
+
+class Theme:
+    bg      = "#14161b"
+    panel   = "#1c1f27"
+    panel2  = "#232734"
+    border  = "#2e3342"
+    text    = "#e9ebf1"
+    muted   = "#8b93a7"
+    dim     = "#5d6578"
+    accent  = "#5b9cf8"
+    ok      = "#3ecf8e"
+    err     = "#ff6b6b"
+    warn    = "#f5a524"
+
+
+PREVIEW_BOX = 244
+WIN_W, WIN_H = 780, 476
+PAD = 20
+
+
+def _pick_font(root, *names):
+    have = {f.lower() for f in tkfont.families(root)}
+    for n in names:
+        if n.lower() in have:
+            return n
+    return "TkDefaultFont"
+
+
+def _round_rect(cv, x0, y0, x1, y1, r, **kw):
+    """Rounded rectangle as a smoothed polygon (no themed-widget fights)."""
+    r = min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0)
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+           x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
+class Uploader:
+    """The whole window. Fixed size, hand-drawn widgets, no ttk theming."""
+
+    def __init__(self, root, info, filename, ip_addr):
+        self.root = root
+        self.info = info
+        self._preview_ref = None
+        self._answer = tk.IntVar(value=-1)
+
+        ui = _pick_font(root, "Inter", "SF Pro Text", "Segoe UI", "Ubuntu",
+                        "DejaVu Sans", "Helvetica Neue")
+        mono = _pick_font(root, "JetBrains Mono", "SF Mono", "Menlo",
+                          "Cascadia Mono", "Consolas", "DejaVu Sans Mono")
+        self.f_title = (ui, 15, "bold")
+        self.f_sub   = (ui, 10)
+        self.f_lbl   = (ui, 8, "bold")
+        self.f_val   = (ui, 11, "bold")
+        self.f_body  = (ui, 10)
+        self.f_mono  = (mono, 9)
+        self.f_big   = (ui, 17, "bold")
+
+        root.title("MKS WiFi Upload")
+        root.configure(background=Theme.bg)
+        root.resizable(0, 0)
+        self._center(WIN_W, WIN_H)
+
+        self._build_header(filename, ip_addr)
+        self._build_body()
+        self._build_footer()
+
+    # -- layout ------------------------------------------------------------
+
+    def _center(self, w, h):
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
+                                            max(0, (sh - h) // 3)))
+        self.root.minsize(w, h)
+        self.root.maxsize(w, h)
+
+    def _label(self, parent, text, font, fg, bg, **kw):
+        return tk.Label(parent, text=text, font=font, fg=fg, bg=bg,
+                        anchor=kw.pop('anchor', 'w'), justify='left', **kw)
+
+    def _card(self, parent, **kw):
+        return tk.Frame(parent, bg=Theme.panel, highlightthickness=1,
+                        highlightbackground=Theme.border,
+                        highlightcolor=Theme.border, **kw)
+
+    def _build_header(self, filename, ip_addr):
+        bar = tk.Frame(self.root, bg=Theme.bg)
+        bar.pack(fill='x', padx=PAD, pady=(16, 12))
+
+        left = tk.Frame(bar, bg=Theme.bg)
+        left.pack(side='left', fill='x', expand=True)
+        self._label(left, filename, self.f_title, Theme.text, Theme.bg).pack(anchor='w')
+        self.lbl_sub = self._label(left, "Preparing upload...", self.f_sub,
+                                   Theme.muted, Theme.bg)
+        self.lbl_sub.pack(anchor='w', pady=(2, 0))
+
+        right = tk.Frame(bar, bg=Theme.bg)
+        right.pack(side='right')
+        self.dot = tk.Canvas(right, width=10, height=10, bg=Theme.bg,
+                             highlightthickness=0)
+        self.dot.pack(side='left', padx=(0, 7), pady=(6, 0))
+        self._dot_id = self.dot.create_oval(1, 1, 9, 9, fill=Theme.warn, outline="")
+        self._label(right, ip_addr, self.f_mono, Theme.muted, Theme.bg).pack(
+            side='left', pady=(5, 0))
+
+    def _build_body(self):
+        body = tk.Frame(self.root, bg=Theme.bg)
+        body.pack(fill='both', expand=True, padx=PAD)
+
+        # --- preview card ---
+        card = self._card(body, width=PREVIEW_BOX + 16, height=PREVIEW_BOX + 16)
+        card.pack(side='left')
+        card.pack_propagate(False)
+        img = self.info.get("preview")
+        if img is not None:
+            flat = Image.new("RGB", img.size, self._rgb(Theme.panel))
+            flat.paste(img, (0, 0), img if img.mode == "RGBA" else None)
+            self._preview_ref = ImageTk.PhotoImage(flat)
+            tk.Label(card, image=self._preview_ref, bg=Theme.panel,
+                     bd=0).pack(expand=True)
+        else:
+            ph = tk.Frame(card, bg=Theme.panel)
+            ph.pack(expand=True)
+            self._label(ph, "no preview", self.f_body, Theme.dim, Theme.panel,
+                        anchor='center').pack()
+            self._label(ph, "enable thumbnails in the slicer", (self.f_sub[0], 8),
+                        Theme.dim, Theme.panel, anchor='center').pack(pady=(4, 0))
+
+        # --- stats column ---
+        right = tk.Frame(body, bg=Theme.bg)
+        right.pack(side='left', fill='both', expand=True, padx=(16, 0))
+
+        tiles = tk.Frame(right, bg=Theme.bg)
+        tiles.pack(fill='x')
+        self.tile_time = self._tile(tiles, "PRINT TIME", self.info["time"], 0)
+        self.tile_fil  = self._tile(tiles, "FILAMENT", self.info["filament"], 1)
+        self.tile_lay  = self._tile(tiles, "LAYERS", self.info["layers"], 2)
+        for c in range(3):
+            tiles.grid_columnconfigure(c, weight=1, uniform="tile")
+
+        det = self._card(right)
+        det.pack(fill='both', expand=True, pady=(12, 0))
+        inner = tk.Frame(det, bg=Theme.panel)
+        inner.pack(fill='both', expand=True, padx=14, pady=11)
+        rows = self.info["rows"][:8]
+        if not rows:
+            self._label(inner, "no slicer metadata found", self.f_body,
+                        Theme.dim, Theme.panel).pack(anchor='w')
+        for i, (k, v) in enumerate(rows):
+            self._label(inner, k, self.f_body, Theme.muted, Theme.panel).grid(
+                row=i, column=0, sticky='w', pady=1)
+            self._label(inner, v, self.f_body, Theme.text, Theme.panel).grid(
+                row=i, column=1, sticky='e', pady=1)
+        inner.grid_columnconfigure(1, weight=1)
+
+    def _tile(self, parent, title, value, col):
+        card = self._card(parent)
+        card.grid(row=0, column=col, sticky='nsew', padx=(0 if col == 0 else 8, 0))
+        pad = tk.Frame(card, bg=Theme.panel)
+        pad.pack(fill='both', expand=True, padx=12, pady=9)
+        self._label(pad, title, self.f_lbl, Theme.dim, Theme.panel).pack(anchor='w')
+        val = self._label(pad, value or "-", self.f_big,
+                          Theme.text if value else Theme.dim, Theme.panel)
+        val.pack(anchor='w', pady=(3, 0))
+        return val
+
+    def _build_footer(self):
+        foot = tk.Frame(self.root, bg=Theme.bg)
+        foot.pack(fill='x', padx=PAD, pady=(14, 16))
+
+        top = tk.Frame(foot, bg=Theme.bg)
+        top.pack(fill='x')
+        self.lbl_status = self._label(top, "Starting...", self.f_body,
+                                      Theme.text, Theme.bg)
+        self.lbl_status.pack(side='left')
+        self.lbl_pct = self._label(top, "0%", self.f_mono, Theme.muted, Theme.bg,
+                                   anchor='e')
+        self.lbl_pct.pack(side='right')
+
+        self.bar_w = WIN_W - 2 * PAD
+        self.bar = tk.Canvas(foot, width=self.bar_w, height=8, bg=Theme.bg,
+                             highlightthickness=0)
+        self.bar.pack(fill='x', pady=(8, 7))
+        _round_rect(self.bar, 0, 0, self.bar_w, 8, 4, fill=Theme.panel2, outline="")
+        self._bar_fill = None
+
+        self.lbl_detail = self._label(foot, "", self.f_mono, Theme.dim, Theme.bg)
+        self.lbl_detail.pack(side='left')
+
+        self.btns = tk.Frame(foot, bg=Theme.bg)  # packed on demand
+
+    # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _rgb(hexcolor):
+        h = hexcolor.lstrip('#')
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def set_tile(self, which, value):
+        tile = {"time": self.tile_time, "filament": self.tile_fil,
+                "layers": self.tile_lay}[which]
+        tile.configure(text=value or "-", fg=Theme.text if value else Theme.dim)
+
+    def set_subtitle(self, text):
+        self.lbl_sub.configure(text=text)
+
+    def set_dot(self, color):
+        self.dot.itemconfigure(self._dot_id, fill=color)
+
+    def set_status(self, text, color=None, detail=None):
+        self.lbl_status.configure(text=text, fg=color or Theme.text)
+        if detail is not None:
+            self.lbl_detail.configure(text=detail)
+        self.root.update()
+
+    def set_progress(self, frac, color=None):
+        frac = max(0.0, min(1.0, frac))
+        self.lbl_pct.configure(text="%d%%" % int(frac * 100))
+        if self._bar_fill is not None:
+            self.bar.delete(self._bar_fill)
+            self._bar_fill = None
+        w = frac * self.bar_w
+        if w >= 1:
+            self._bar_fill = _round_rect(self.bar, 0, 0, max(w, 8), 8, 4,
+                                         fill=color or Theme.accent, outline="")
+
+    def ask(self, question, yes="Start print", no="Not now"):
+        """Inline yes/no row; returns True/False once the user picks."""
+        self.set_status(question, Theme.warn)
+        for child in self.btns.winfo_children():
+            child.destroy()
+        self._button(self.btns, no, Theme.muted, Theme.panel2,
+                     lambda: self._answer.set(0)).pack(side='right')
+        self._button(self.btns, yes, "#0d1117", Theme.accent,
+                     lambda: self._answer.set(1)).pack(side='right', padx=(0, 8))
+        self.btns.pack(side='right')
+        self._answer.set(-1)
+        self.root.wait_variable(self._answer)
+        self.btns.pack_forget()
+        return self._answer.get() == 1
+
+    def _button(self, parent, text, fg, bg, cmd):
+        b = tk.Label(parent, text=text, font=self.f_body, fg=fg, bg=bg,
+                     padx=14, pady=5, cursor="hand2")
+        b.bind("<Button-1>", lambda _e: cmd())
+        b.bind("<Enter>", lambda _e: b.configure(bg=self._lighten(bg, 0.14)))
+        b.bind("<Leave>", lambda _e: b.configure(bg=bg))
+        return b
+
+    @staticmethod
+    def _lighten(hexcolor, amount):
+        r, g, b = Uploader._rgb(hexcolor)
+        mix = lambda c: int(c + (255 - c) * amount)
+        return "#%02x%02x%02x" % (mix(r), mix(g), mix(b))
+
+    def wait(self, seconds, label=None):
+        """Sleep while still pumping the event loop, so the window repaints."""
+        end = time.time() + seconds
+        last = None
+        while True:
+            left = end - time.time()
+            if left <= 0:
+                break
+            if label:
+                n = int(left) + 1
+                if n != last:
+                    self.lbl_detail.configure(text=label % n)
+                    last = n
+            try:
+                self.root.update()
+            except tk.TclError:
+                return
+            time.sleep(0.03)
+
+
+# ===========================================================================
+# Upload plumbing
+# ===========================================================================
+
+def _short_err(e):
+    """urllib3 wraps errors in three layers of repr; show the useful bit."""
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return "no answer from %s (connect timed out)" % ip_addr
+    if isinstance(e, requests.exceptions.ReadTimeout):
+        return "%s stopped responding mid-upload" % ip_addr
+    if isinstance(e, requests.exceptions.ConnectionError):
+        return "cannot reach %s - is the printer on the network?" % ip_addr
+    msg = str(e).strip().replace("\n", " ")
+    return msg[:100] + "..." if len(msg) > 100 else msg
+
+
+_LAYER_TOKEN = b";LAYER_CHANGE"
+
+
+class GcodeUpload:
+    """The request body: the file itself, byte for byte.
+
+    Streams straight off disk so a 300 MB print never lands in RAM, reports
+    progress as requests drains it, and -- since we are touching every byte
+    anyway -- counts layers for the slicers that write no total.
+    `__len__` matters: without it requests falls back to chunked encoding,
+    where the old buffered body always sent a Content-Length. Keep it so the
+    request on the wire stays the one the printer has been accepting.
+    """
+
+    def __init__(self, path, callback=None):
+        self._f = open(path, "rb")
+        self._len = os.fstat(self._f.fileno()).st_size
         self._callback = callback
-        self._cb_args = cb_args
-        self._cb_kwargs = cb_kwargs
         self._progress = 0
-        self._len = len(buf)
-        io.BytesIO.__init__(self, buf)
+        self._carry = b""
+        self.layers = 0
 
     def __len__(self):
         return self._len
 
     def read(self, n=-1):
-        chunk = io.BytesIO.read(self, n)
-        self._progress += int(len(chunk))
-        self._cb_kwargs.update({
-            'size'    : self._len,
-            'progress': self._progress
-        })
+        chunk = self._f.read(n)
+        if chunk:
+            self._progress += len(chunk)
+            self._count_layers(chunk)
         if self._callback:
-            try:
-                self._callback(*self._cb_args, **self._cb_kwargs)
-            except: # catches exception from the callback
-                raise CancelledError('The upload was cancelled.')
+            self._callback(self._len, self._progress)
         return chunk
 
+    def _count_layers(self, chunk):
+        # Carry the last len(token)-1 bytes so a token split across two reads
+        # is still seen. The carry is too short to hold a whole token, so
+        # nothing gets counted twice.
+        buf = self._carry + chunk
+        self.layers += buf.count(_LAYER_TOKEN)
+        self._carry = buf[-(len(_LAYER_TOKEN) - 1):]
+
+    def close(self):
+        self._f.close()
+
+
+_last_paint = [0.0]
+_upload_start = [0.0]
+
+
 def upload_progress(size, progress):
-    if size > 0:
-        prog_perc = progress*100/size
-        top.prg_UploadProgress['value'] = int(prog_perc)
-        top.lbl_UploadStatus['text'] = "Uploading {0} / {1} bytes ({2:.2f}%)".format(progress, size, prog_perc)
-        root.update()
+    if size <= 0:
+        return
+    now = time.time()
+    done = progress >= size
+    if not done and now - _last_paint[0] < 0.05:
+        return  # ~20 fps: repainting per 8 KB chunk throttles the transfer
+    _last_paint[0] = now
 
+    elapsed = max(1e-3, now - _upload_start[0])
+    rate = progress / elapsed
+    eta = (size - progress) / rate if rate > 0 else 0
+    ui.set_progress(progress / float(size))
+    ui.set_status("Uploading to printer", Theme.text,
+                  "%s / %s   %s/s   %s left" % (
+                      _fmt_bytes(progress), _fmt_bytes(size),
+                      _fmt_bytes(rate), _fmt_secs(eta)))
 
-def gui_init(top, gui, *args, **kwargs):
-    global w, top_level, root
-    w = gui
-    top_level = top
-    root = top
-
-def gui_destroy_window():
-    # Function which closes the window.
-    global top_level
-    top_level.destroy()
-    top_level = None
 
 def startJob(ip_addr, sd_name):
-    global top
+    ui.set_status("Starting print job...", Theme.text, "M23 / M24 -> %s:8080" % ip_addr)
     socket = pysock.socket(pysock.AF_INET, pysock.SOCK_STREAM)
+    socket.settimeout(10)
     try:
         socket.connect((ip_addr, 8080))
-    except Exception as e:
-        print(e)
-        raise(e)
-    socket.send(("M23 %s" %sd_name + "\r\n").encode())
-    socket.send(("M24" + "\r\n").encode())
-    try:
+        socket.send(("M23 %s" % sd_name + "\r\n").encode())
+        socket.send(("M24" + "\r\n").encode())
         socket.shutdown(pysock.SHUT_RDWR)
         socket.close()
     except Exception as e:
-        print(e)
-        raise(e)
-    top.lbl_UploadStatus['text'] = "Print job started!"
-    top.prg_UploadProgress['value'] = int(100)
-    root.update()
+        _dbg("startJob FAILED: %r" % (e,))
+        ui.set_dot(Theme.err)
+        ui.set_status("Could not start the job", Theme.err, _short_err(e))
+        print("Starting job on %s failed: %r" % (ip_addr, e), file=sys.stderr)
+        return False
+    ui.set_dot(Theme.ok)
+    ui.set_status("Printing", Theme.ok, "%s is now printing %s" % (ip_addr, sd_name))
+    ui.set_progress(1.0, Theme.ok)
+    return True
+
 
 def startTransfer():
-    global ip_addr, localfile, sd_name
-    root.update() # force initial paint (macOS aqua won't draw the window before the blocking work below)
-    convertPrusaThumb2TFTThumb(localfile) # converting Prusa Thumbs into TFT Thumbs
-    with open(localfile, 'r', encoding="utf-8") as f:
-        gcode = f.read()
-    body_buffer = BufferReader(gcode.encode(), upload_progress)
-    # timeout=(connect, read): fail fast if the printer is unreachable or stops
-    # responding, so OrcaSlicer reports an error instead of hanging forever.
-    _dbg("uploading to %s (uid=%d) file=%s" % (ip_addr, os.getuid(), sd_name))
+    ui.set_dot(Theme.warn)
     try:
-        r = requests.post("http://{:s}/upload?X-Filename={:s}".format(ip_addr, sd_name), data=body_buffer, headers={'Content-Type': 'application/octet-stream', 'Connection' : 'keep-alive'}, timeout=(10, 60))
-        _dbg("upload OK: status=%s" % (getattr(r, "status_code", "?"),))
-    except requests.exceptions.RequestException as e:
-        _dbg("upload FAILED: %r" % (e,))
-        top.lbl_UploadStatus['text'] = "Upload failed: {0}".format(e)
-        root.update()
-        print("Upload to {0} failed: {1}".format(ip_addr, e), file=sys.stderr)
-        time.sleep(3)
+        body = GcodeUpload(localfile, upload_progress)
+    except OSError as e:
+        ui.set_dot(Theme.err)
+        ui.set_status("Cannot read the G-code", Theme.err, _short_err(e))
+        print("Cannot read {0}: {1}".format(localfile, e), file=sys.stderr)
+        ui.wait(6)
         root.destroy()
         sys.exit(1)
-    top.lbl_UploadStatus['text'] = "Done!"
-    root.update()
-    if mode == "always":
-        time.sleep(3)
-        startJob(ip_addr, sd_name)
-    elif mode=="never": pass
-    else:
-        printUploaded = msbx.askyesno("Start print job?", "Print uploaded file?")
-        if printUploaded: startJob(ip_addr, sd_name)
-    time.sleep(3)
-    root.destroy()
-    try: exit()
-    except SystemExit as e: pass
 
-root = tk.Tk()
-top = Main(root)
-gui_init(root, top)
+    total = len(body)
+    if not info["layers"]:
+        ui.set_tile("layers", "...")  # counted from the stream, filled in below
+    ui.set_subtitle("%s  -  %s" % (_fmt_bytes(total), sd_name))
+    ui.set_status("Connecting to %s..." % ip_addr)
+
+    _upload_start[0] = time.time()
+    _dbg("uploading to %s (uid=%d) file=%s" % (ip_addr, os.getuid(), sd_name))
+    # timeout=(connect, read): fail fast if the printer is unreachable or stops
+    # responding, so OrcaSlicer reports an error instead of hanging forever.
+    try:
+        r = requests.post(
+            "http://{:s}/upload?X-Filename={:s}".format(ip_addr, sd_name),
+            data=body,
+            headers={'Content-Type': 'application/octet-stream',
+                     'Connection': 'keep-alive'},
+            timeout=(10, 60))
+        _dbg("upload OK: status=%s" % (getattr(r, "status_code", "?"),))
+    except (requests.exceptions.RequestException, OSError) as e:
+        _dbg("upload FAILED: %r" % (e,))
+        ui.set_dot(Theme.err)
+        ui.set_progress(1.0, Theme.err)
+        ui.set_status("Upload failed", Theme.err, _short_err(e))
+        print("Upload to {0} failed: {1}".format(ip_addr, e), file=sys.stderr)
+        body.close()
+        ui.wait(6)
+        root.destroy()
+        sys.exit(1)
+
+    body.close()
+    took = time.time() - _upload_start[0]
+    if not info["layers"]:  # PrusaSlicer writes no total; we counted the stream
+        ui.set_tile("layers", "%d" % body.layers if body.layers else None)
+    ui.set_progress(1.0, Theme.ok)
+    ui.set_dot(Theme.ok)
+    ui.set_status("Uploaded", Theme.ok,
+                  "%s in %s (%s/s)" % (_fmt_bytes(total), _fmt_secs(took),
+                                       _fmt_bytes(total / max(took, 1e-3))))
+
+    if mode == "always":
+        ui.wait(2)
+        startJob(ip_addr, sd_name)
+    elif mode == "never":
+        pass
+    elif ui.ask("Start the print job now?"):
+        startJob(ip_addr, sd_name)
+
+    ui.wait(4, "closing in %ds")
+    root.destroy()
+
+
+# ===========================================================================
+# Entry point
+# ===========================================================================
 
 mode = "always"
 ip_addr = "10.0.0.55"
 
+root = tk.Tk()
+root.withdraw()  # keep the empty frame off-screen until the UI is populated
+
 try:
     localfile = sys.argv[1]
 except IndexError:
-    localfile = fldg.askopenfilename()
+    localfile = fldg.askopenfilename(title="G-code to upload")
+    if not localfile:
+        sys.exit(0)
 
-sd_name = os.path.split(localfile)[1] #temporary filename, PrusaSlicer >= 2.4
+sd_name = os.path.split(localfile)[1]  # temporary filename, PrusaSlicer >= 2.4
 
-env_slicer_pp_output_name = os.getenv('SLIC3R_PP_OUTPUT_NAME') #final output filename, PrusaSlicer >= 2.4
-
+env_slicer_pp_output_name = os.getenv('SLIC3R_PP_OUTPUT_NAME')  # final name, PS >= 2.4
 if env_slicer_pp_output_name:
     sd_name = os.path.split(env_slicer_pp_output_name)[1]
 
-root.after(10, startTransfer)
+# Read the previews/metadata BEFORE the TFT conversion strips the PNG blocks.
+info = read_gcode_info(localfile, PREVIEW_BOX)
+
+ui = Uploader(root, info, sd_name, ip_addr)
+root.deiconify()
+root.after(30, startTransfer)
 root.mainloop()
