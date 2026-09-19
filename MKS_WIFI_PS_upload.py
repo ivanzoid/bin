@@ -450,7 +450,7 @@ class Theme:
 
 
 PREVIEW_BOX = 244
-WIN_W, WIN_H = 780, 476
+WIN_W = 780        # height is measured from the content, see Uploader._fit
 PAD = 20
 
 
@@ -494,20 +494,35 @@ class Uploader:
         root.title("MKS WiFi Upload")
         root.configure(background=Theme.bg)
         root.resizable(0, 0)
-        self._center(WIN_W, WIN_H)
 
+        self._pos = None
         self._build_header(filename, ip_addr)
-        self._build_body()
         self._build_footer()
+        self._build_body()
+        self._fill_details()
+        self._fit()
 
     # -- layout ------------------------------------------------------------
 
-    def _center(self, w, h):
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
-                                            max(0, (sh - h) // 3)))
-        self.root.minsize(w, h)
-        self.root.maxsize(w, h)
+    def _fit(self):
+        """Size the window to the content it ended up with.
+
+        Row heights depend on whichever font the machine had, and rows get
+        added at runtime, so the height is measured rather than declared --
+        a fixed one either clipped the footer or left dead space. Position is
+        chosen once, so a later regrow does not make the window jump.
+        """
+        self.root.update_idletasks()
+        h = self.root.winfo_reqheight()
+        if self._pos is None:
+            sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            self._pos = (max(0, (sw - WIN_W) // 2), max(0, (sh - h) // 3))
+        self.root.minsize(WIN_W, h)      # min == max keeps it non-resizable
+        self.root.maxsize(WIN_W, h)
+        self.root.geometry("%dx%d+%d+%d" % (WIN_W, h, self._pos[0], self._pos[1]))
+
+    DET_GAP = 12   # tiles -> details card
+    DET_PAD = 11   # details card inner padding, top and bottom
 
     def _label(self, parent, text, font, fg, bg, **kw):
         return tk.Label(parent, text=text, font=font, fg=fg, bg=bg,
@@ -544,7 +559,7 @@ class Uploader:
 
         # --- preview card ---
         card = self._card(body, width=PREVIEW_BOX + 16, height=PREVIEW_BOX + 16)
-        card.pack(side='left')
+        card.pack(side='left', anchor='n')
         card.pack_propagate(False)
         img = self.info.get("preview")
         if img is not None:
@@ -574,18 +589,20 @@ class Uploader:
             tiles.grid_columnconfigure(c, weight=1, uniform="tile")
 
         det = self._card(right)
-        det.pack(fill='both', expand=True, pady=(12, 0))
+        det.pack(fill='both', expand=True, pady=(self.DET_GAP, 0))
         self._det = tk.Frame(det, bg=Theme.panel)
-        self._det.pack(fill='both', expand=True, padx=14, pady=11)
+        self._det.pack(fill='both', expand=True, padx=14, pady=self.DET_PAD)
         self._det_rows = 0
         self._det_empty = None
-        for k, v in self.info["rows"][:8]:
+        self._det.grid_columnconfigure(1, weight=1)
+
+    def _fill_details(self):
+        for k, v in self.info["rows"]:
             self.add_detail(k, v)
         if not self._det_rows:
             self._det_empty = self._label(self._det, "no slicer metadata found",
                                           self.f_body, Theme.dim, Theme.panel)
             self._det_empty.grid(row=0, column=0, columnspan=2, sticky='w')
-        self._det.grid_columnconfigure(1, weight=1)
 
     def add_detail(self, key, value):
         """Append a row to the details card (also used for runtime facts)."""
@@ -597,6 +614,8 @@ class Uploader:
         self._label(self._det, value, self.f_body, Theme.text, Theme.panel).grid(
             row=self._det_rows, column=1, sticky='e', pady=1)
         self._det_rows += 1
+        if self._pos is not None:   # added after the first fit -- grow to suit
+            self._fit()
 
     def _tile(self, parent, title, value, col):
         card = self._card(parent)
@@ -611,7 +630,7 @@ class Uploader:
 
     def _build_footer(self):
         foot = tk.Frame(self.root, bg=Theme.bg)
-        foot.pack(fill='x', padx=PAD, pady=(14, 16))
+        foot.pack(side='bottom', fill='x', padx=PAD, pady=(14, 16))
 
         top = tk.Frame(foot, bg=Theme.bg)
         top.pack(fill='x')
@@ -679,9 +698,11 @@ class Uploader:
         self._button(self.btns, yes, "#0d1117", Theme.accent,
                      lambda: self._answer.set(1)).pack(side='right', padx=(0, 8))
         self.btns.pack(side='right')
+        self._fit()
         self._answer.set(-1)
         self.root.wait_variable(self._answer)
         self.btns.pack_forget()
+        self._fit()
         return self._answer.get() == 1
 
     def _button(self, parent, text, fg, bg, cmd):
