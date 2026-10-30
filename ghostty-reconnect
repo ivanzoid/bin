@@ -100,7 +100,18 @@ export SSH_TINT_IDENTITY="ivan@$identity"
 # Remote command: best-effort cd into the dir, then exec a fresh, auto-named
 # tmux session. session-name.sh lives on the remote. $HOME is left unexpanded
 # here so the *remote* shell expands it (a quoted "~" would not expand).
-remote_cmd='exec tmux new-session -s "$($HOME/.tmux/session-name.sh)"'
+#
+# The session is tagged with this tab's id (@ghostty_tab) so a restored tab can
+# find it again. The id names a marker dir on the Mac that we report to Ghostty
+# as this surface's cwd (OSC 7): window-save-state keeps it across a Ghostty
+# quit, and the restored surface starts in it. The OSC 7 sticks because we exec
+# into mosh/ssh below, so no shell prompt reports another cwd after it.
+tab_id="$(date +%Y%m%d-%H%M%S)-$$"
+tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
+mkdir -p "$tab_dir" && printf '%s\n%s\n' "$transport" "$host" > "$tab_dir/target"
+printf '\e]7;file://%s%s\a' "$HOSTNAME" "$tab_dir" 2>/dev/null > /dev/tty
+# "=name:" targets the new session exactly; a bare `set` could hit another one.
+remote_cmd="n=\"\$(\$HOME/.tmux/session-name.sh)\"; exec tmux new-session -s \"\$n\" \\; set -t \"=\$n:\" @ghostty_tab $tab_id"
 if [[ -n "$dir" ]]; then
     case "$dir" in
         "~"|"~/"*) rdir="\$HOME${dir#\~}" ;;   # ~/ha -> $HOME/ha (literal for remote)
