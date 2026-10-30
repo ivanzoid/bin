@@ -21,6 +21,7 @@
 #   <dir>         remote dir (may start with ~), or empty for "no cd"
 #
 # Usage: ghostty-reconnect <request-file>
+#        ghostty-reconnect --restore <tab-dir>   (a tab Ghostty restored; see ~/.zprofile)
 
 set -u
 
@@ -76,13 +77,26 @@ launch() {
     exec "${SHELL:-/bin/zsh}" -li
 }
 
-req="${1:-}"
-[[ -n "$req" && -r "$req" ]] || fallback
-
-# Read the four fields, then remove the request so no later shell reuses it.
 transport="" host="" dir=""
-{ read -r _epoch; read -r transport; read -r host; read -r dir; } < "$req"
-rm -f "$req" 2>/dev/null
+if [[ "${1:-}" == --restore ]]; then
+    # A tab Ghostty restored after a quit: it starts in its marker dir (see the
+    # tab id notes below), which holds the transport + host it was connected to.
+    tab_dir="${2:-}"
+    [[ -r "$tab_dir/target" ]] || fallback
+    { read -r transport; read -r host; } < "$tab_dir/target"
+    tab_id="${tab_dir##*/}"
+else
+    req="${1:-}"
+    [[ -n "$req" && -r "$req" ]] || fallback
+
+    # Read the four fields, then remove the request so no later shell reuses it.
+    { read -r _epoch; read -r transport; read -r host; read -r dir; } < "$req"
+    rm -f "$req" 2>/dev/null
+
+    tab_id="$(date +%Y%m%d-%H%M%S)-$$"
+    tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
+    mkdir -p "$tab_dir" && printf '%s\n%s\n' "$transport" "$host" > "$tab_dir/target"
+fi
 [[ -n "$host" ]] || fallback
 
 # .zprofile's PATH setup hasn't run yet, so make the mosh/ssh tint wrapper
@@ -106,12 +120,16 @@ export SSH_TINT_IDENTITY="ivan@$identity"
 # as this surface's cwd (OSC 7): window-save-state keeps it across a Ghostty
 # quit, and the restored surface starts in it. The OSC 7 sticks because we exec
 # into mosh/ssh below, so no shell prompt reports another cwd after it.
-tab_id="$(date +%Y%m%d-%H%M%S)-$$"
-tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
-mkdir -p "$tab_dir" && printf '%s\n%s\n' "$transport" "$host" > "$tab_dir/target"
 printf '\e]7;file://%s%s\a' "$HOSTNAME" "$tab_dir" 2>/dev/null > /dev/tty
 # "=name:" targets the new session exactly; a bare `set` could hit another one.
 remote_cmd="n=\"\$(\$HOME/.tmux/session-name.sh)\"; exec tmux new-session -s \"\$n\" \\; set -t \"=\$n:\" @ghostty_tab $tab_id"
+# A restored tab reattaches to the session carrying its id, or starts a new one
+# with the same id if that session is gone. attach -d detaches the session's
+# other clients: after a Ghostty quit those are the orphaned mosh-servers' tmux
+# clients, and dropping them lets those mosh-servers exit.
+if [[ "${1:-}" == --restore ]]; then
+    remote_cmd="s=\"\$(tmux list-sessions -F '#{session_name} #{@ghostty_tab}' 2>/dev/null | awk -v t=$tab_id '\$2 == t { print \$1; exit }')\"; [ -n \"\$s\" ] && exec tmux attach -d -t \"=\$s\"; $remote_cmd"
+fi
 if [[ -n "$dir" ]]; then
     case "$dir" in
         "~"|"~/"*) rdir="\$HOME${dir#\~}" ;;   # ~/ha -> $HOME/ha (literal for remote)
