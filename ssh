@@ -162,6 +162,10 @@ if [[ "$self" == mosh && "$target" == *.local* && "$*" != *--family* ]]; then
     ARGS=(--family=inet "$@")
 fi
 
+# Drop mosh-client's "[mosh] " window-title prefix: the remote "[host]" bracket
+# from ~/.tmux.conf already marks the tab as remote.
+[[ "$self" == mosh ]] && export MOSH_TITLE_NOPREFIX=1
+
 if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
     exec "$REAL" "${ARGS[@]}"
 fi
