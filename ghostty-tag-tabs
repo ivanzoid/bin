@@ -1,0 +1,93 @@
+#!/bin/bash
+# One-off migration: make the Ghostty tabs that are *already* connected with
+# mosh restorable after a Ghostty quit, like tabs opened since the restore
+# scheme went in (see ~/bin/ghostty-reconnect and the mosh wrapper ~/bin/ssh).
+#
+# Each such tab needs two things:
+#   - its tmux session tagged with a tab id (@ghostty_tab), and
+#   - a marker dir ~/.cache/ghostty-tabs/<id> reported to Ghostty as the tab's
+#     cwd (OSC 7), so window-save-state brings the tab back in it.
+# mosh drops OSC 7, so the remote can't report it. Instead, on the Mac we find
+# each tab's mosh-client (its argv ends in "<ip> <port>") and write the OSC 7
+# straight to that tab's tty. On the remote, the UDP port leads to the
+# mosh-server, and the tmux client under it to the session.
+#
+# A session that already has a tag keeps it; its tab gets that id.
+# ssh tabs and orphaned mosh-servers (no mosh-client on the Mac) are skipped.
+#
+# Usage (on the Mac): ghostty-tag-tabs [-n]     -n = dry run, change nothing
+# Internal:           ghostty-tag-tabs --remote [-n]   (reads "<port> <id>" lines)
+
+set -u
+
+dry=""
+
+# ---- Remote side: "<port> <id>" lines in, "<port> <id> <session>" lines out ----
+remote() {
+    local clients port id spid sess cpid cs p cur
+    clients="$(tmux list-clients -F '#{client_pid} #{session_name}' 2>/dev/null)"
+    while read -r port id; do
+        spid="$(ss -Hulpn "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1)"
+        spid="${spid#pid=}"
+        sess=""
+        if [[ -n "$spid" ]]; then
+            # The tmux client whose ancestry reaches this mosh-server.
+            while read -r cpid cs; do
+                p="$cpid"
+                while [[ -n "$p" && "$p" -gt 1 ]]; do
+                    if [[ "$p" == "$spid" ]]; then sess="$cs"; break 2; fi
+                    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+                done
+            done <<< "$clients"
+        fi
+        if [[ -z "$sess" ]]; then echo "$port - -"; continue; fi
+        cur="$(tmux show -t "=$sess:" -v @ghostty_tab 2>/dev/null)"
+        if [[ -z "$cur" ]]; then
+            [[ -n "$dry" ]] || tmux set -t "=$sess:" @ghostty_tab "$id"
+            cur="$id"
+        fi
+        echo "$port $cur $sess"
+    done
+}
+
+# Bare host label for an IP from /etc/hosts (as ghostty-reconnect expects), else the IP.
+host_label() {
+    local h
+    h="$(awk -v ip="$1" '/^[[:space:]]*#/ { next } $1 == ip { print $2; exit }' /etc/hosts 2>/dev/null)"
+    printf '%s' "${h:-$1}"
+}
+
+if [[ "${1:-}" == --remote ]]; then
+    [[ "${2:-}" == -n ]] && dry=1
+    remote
+    exit 0
+fi
+[[ "${1:-}" == -n ]] && dry=1
+
+# ---- Mac side ----
+# mosh-client processes with a tty: "<pid> <tty> <ip> <port>".
+tabs="$(ps -axo pid=,tty=,args= | awk '$3 ~ /(^|\/)mosh-client$/ && $2 != "??" { print $1, $2, $(NF-1), $NF }')"
+[[ -n "$tabs" ]] || { echo "no mosh tabs found"; exit 0; }
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+for ip in $(awk '{ print $3 }' <<< "$tabs" | sort -u); do
+    label="$(host_label "$ip")"
+    # Propose "<stamp>-<mosh-client pid>" as each tab's id.
+    req="$(awk -v ip="$ip" -v s="$stamp" '$3 == ip { print $4, s "-" $1 }' <<< "$tabs")"
+    res="$(/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=5 "ivan@$ip" \
+        "\$HOME/bin/ghostty-tag-tabs --remote ${dry:+-n}" <<< "$req")" \
+        || { echo "$label: ssh failed, skipped"; continue; }
+
+    while read -r port id sess; do
+        tty="$(awk -v ip="$ip" -v port="$port" '$3 == ip && $4 == port { print $2; exit }' <<< "$tabs")"
+        if [[ "$id" == - ]]; then
+            echo "$label /dev/$tty: no tmux session found, skipped"
+            continue
+        fi
+        echo "$label /dev/$tty -> $sess ($id)"
+        [[ -n "$dry" ]] && continue
+        dir="$HOME/.cache/ghostty-tabs/$id"
+        mkdir -p "$dir" && printf 'mosh\n%s\n' "$label" > "$dir/target" \
+            && printf '\e]7;file://%s%s\a' "$HOSTNAME" "$dir" > "/dev/$tty"
+    done <<< "$res"
+done
