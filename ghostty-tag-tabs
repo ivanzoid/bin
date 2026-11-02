@@ -24,22 +24,26 @@ dry=""
 
 # ---- Remote side: "<port> <id>" lines in, "<port> <id> <session>" lines out ----
 remote() {
-    local clients port id spid sess cpid cs p cur
-    clients="$(tmux list-clients -F '#{client_pid} #{session_name}' 2>/dev/null)"
+    # One snapshot each, then in-memory lookups (a ps per step was ~1 min):
+    #   port -> mosh-server pid (ss), pid -> parent pid (ps), and from that,
+    #   mosh-server pid -> session of the tmux client under it.
+    local -A port_pid=() ppid=() srv_sess=()
+    local port pid par cpid cs p id sess cur
+    while read -r port pid; do port_pid[$port]="$pid"; done < <(
+        ss -Hulpn 2>/dev/null | awk '/mosh-server/ { n = split($4, a, ":"); match($0, /pid=[0-9]+/)
+            print a[n], substr($0, RSTART + 4, RLENGTH - 4) }')
+    while read -r pid par; do ppid[$pid]="$par"; done < <(ps -eo pid=,ppid=)
+    while read -r cpid cs; do
+        p="$cpid"
+        while [[ -n "$p" && "$p" -gt 1 ]]; do
+            srv_sess[$p]="$cs"   # every ancestor; only mosh-server pids are looked up
+            p="${ppid[$p]:-}"
+        done
+    done < <(tmux list-clients -F '#{client_pid} #{session_name}' 2>/dev/null)
+
     while read -r port id; do
-        spid="$(ss -Hulpn "sport = :$port" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1)"
-        spid="${spid#pid=}"
-        sess=""
-        if [[ -n "$spid" ]]; then
-            # The tmux client whose ancestry reaches this mosh-server.
-            while read -r cpid cs; do
-                p="$cpid"
-                while [[ -n "$p" && "$p" -gt 1 ]]; do
-                    if [[ "$p" == "$spid" ]]; then sess="$cs"; break 2; fi
-                    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
-                done
-            done <<< "$clients"
-        fi
+        pid="${port_pid[$port]:-}"
+        sess="${pid:+${srv_sess[$pid]:-}}"
         if [[ -z "$sess" ]]; then echo "$port - -"; continue; fi
         cur="$(tmux show -t "=$sess:" -v @ghostty_tab 2>/dev/null)"
         if [[ -z "$cur" ]]; then
@@ -54,7 +58,8 @@ remote() {
 host_label() {
     local h
     h="$(awk -v ip="$1" '/^[[:space:]]*#/ { next } $1 == ip { print $2; exit }' /etc/hosts 2>/dev/null)"
-    printf '%s' "${h:-$1}"
+    h="${h:-$1}"
+    printf '%s' "${h%.local}"   # bare label, as the mosh wrapper normalizes it
 }
 
 if [[ "${1:-}" == --remote ]]; then
@@ -69,7 +74,7 @@ fi
 tabs="$(ps -axo pid=,tty=,args= | awk '$3 ~ /(^|\/)mosh-client$/ && $2 != "??" { print $1, $2, $(NF-1), $NF }')"
 [[ -n "$tabs" ]] || { echo "no mosh tabs found"; exit 0; }
 
-stamp="$(date +%Y%m%d-%H%M%S)"
+stamp="$(date +%m%d-%H%M)"
 for ip in $(awk '{ print $3 }' <<< "$tabs" | sort -u); do
     label="$(host_label "$ip")"
     # Propose "<stamp>-<mosh-client pid>" as each tab's id.
