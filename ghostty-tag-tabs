@@ -74,7 +74,7 @@ fi
 tabs="$(ps -axo pid=,tty=,args= | awk '$3 ~ /(^|\/)mosh-client$/ && $2 != "??" { print $1, $2, $(NF-1), $NF }')"
 [[ -n "$tabs" ]] || { echo "no mosh tabs found"; exit 0; }
 
-stamp="$(date +%m%d-%H%M)"
+stamp="$(date +%Y%m%d-%H%M%S)"
 for ip in $(awk '{ print $3 }' <<< "$tabs" | sort -u); do
     label="$(host_label "$ip")"
     # Propose "<stamp>-<mosh-client pid>" as each tab's id.

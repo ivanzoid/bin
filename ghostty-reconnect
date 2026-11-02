@@ -93,7 +93,7 @@ else
     { read -r _epoch; read -r transport; read -r host; read -r dir; } < "$req"
     rm -f "$req" 2>/dev/null
 
-    tab_id="$(date +%m%d-%H%M)-$$"
+    tab_id="$(date +%Y%m%d-%H%M%S)-$$"
     tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
     mkdir -p "$tab_dir" && printf '%s\n%s\n' "$transport" "$host" > "$tab_dir/target"
 fi

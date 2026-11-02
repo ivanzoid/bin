@@ -176,7 +176,7 @@ if [[ "$self" == mosh && $# -eq 1 && "$1" != -* && "${TERM_PROGRAM:-}" == ghostt
       && -t 1 && "$(uname -s)" == Darwin ]]; then
     tab_host="${1#*@}"
     tab_host="${tab_host%.local}"
-    tab_id="$(date +%m%d-%H%M)-$$"
+    tab_id="$(date +%Y%m%d-%H%M%S)-$$"
     tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
     if mkdir -p "$tab_dir" && printf 'mosh\n%s\n' "$tab_host" > "$tab_dir/target"; then
         printf '\e]7;file://%s%s\a' "$HOSTNAME" "$tab_dir" 2>/dev/null > /dev/tty
