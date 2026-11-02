@@ -74,7 +74,10 @@ for ip in $(awk '{ print $3 }' <<< "$tabs" | sort -u); do
     label="$(host_label "$ip")"
     # Propose "<stamp>-<mosh-client pid>" as each tab's id.
     req="$(awk -v ip="$ip" -v s="$stamp" '$3 == ip { print $4, s "-" $1 }' <<< "$tabs")"
-    res="$(/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=5 "ivan@$ip" \
+    # ControlMaster=no: a master forked here (ControlMaster auto + ControlPersist
+    # in ~/.ssh/config) would inherit the $(...) pipe and hang it until it
+    # exits. An existing master is still reused.
+    res="$(/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=5 -o ControlMaster=no "ivan@$ip" \
         "\$HOME/bin/ghostty-tag-tabs --remote ${dry:+-n}" <<< "$req")" \
         || { echo "$label: ssh failed, skipped"; continue; }
 
