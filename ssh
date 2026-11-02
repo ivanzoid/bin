@@ -166,6 +166,24 @@ fi
 # from ~/.tmux.conf already marks the tab as remote.
 [[ "$self" == mosh ]] && export MOSH_TITLE_NOPREFIX=1
 
+# A typed `mosh <host>` in a Ghostty tab: give the tab an id so a Ghostty quit
+# can restore it, the same scheme ghostty-reconnect uses (and reattaches with
+# --restore). The marker dir is reported as the tab's cwd (OSC 7); the id goes
+# to the remote login shell, whose tmux chooser / auto-attach tags the session
+# the tab lands in. Once mosh exits, the local prompt reports the real cwd again,
+# so a tab that is back to local stays local after a restore.
+if [[ "$self" == mosh && $# -eq 1 && "$1" != -* && "${TERM_PROGRAM:-}" == ghostty && -z "${TMUX:-}" \
+      && -t 1 && "$(uname -s)" == Darwin ]]; then
+    tab_host="${1#*@}"
+    tab_host="${tab_host%.local}"
+    tab_id="$(date +%Y%m%d-%H%M%S)-$$"
+    tab_dir="$HOME/.cache/ghostty-tabs/$tab_id"
+    if mkdir -p "$tab_dir" && printf 'mosh\n%s\n' "$tab_host" > "$tab_dir/target"; then
+        printf '\e]7;file://%s%s\a' "$HOSTNAME" "$tab_dir" 2>/dev/null > /dev/tty
+        ARGS+=(-- env GHOSTTY_TAB="$tab_id" zsh -l)
+    fi
+fi
+
 if [[ -z "$target" || "$target" == "@" ]] || [[ ! -t 1 ]] || [[ ! -e /dev/tty ]] || [[ "$(uname -s)" != "Darwin" ]]; then
     exec "$REAL" "${ARGS[@]}"
 fi
